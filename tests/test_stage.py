@@ -1,0 +1,82 @@
+from pathlib import Path
+
+import pytest
+
+from spec_cli.stage import (
+    InvalidBundleError,
+    assert_push_invariants,
+    classify_working_tree,
+    load_index,
+    sha256,
+)
+
+
+def _make_bundle(tmp_path: Path) -> Path:
+    (tmp_path / "spec.yaml").write_text("schema: spec/v0.1\nname: demo\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "product.md").write_text("# Product\n")
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "2026-04-21T11-47-35Z.prompts").write_text(
+        'schema = "spec.prompts/v0.1"\n[commit]\nbranch = "main"\n'
+        'author_name = "t"\nauthor_email = "t@example.com"\n'
+        '[[sessions]]\nid = "x"\nsource = "manual"\n'
+        '[[sessions.turns]]\nrole = "user"\ntext = "hi"\n'
+    )
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    return tmp_path
+
+
+def test_classify_working_tree_separates_ignored(tmp_path):
+    root = _make_bundle(tmp_path)
+    idx = load_index(root)
+    lines = classify_working_tree(root, idx)
+    by_state: dict[str, list[str]] = {}
+    for ln in lines:
+        by_state.setdefault(ln.state, []).append(ln.rel)
+
+    assert "logo.png" in by_state["ignored"]
+    assert "docs/product.md" in by_state["untracked"]
+    assert "spec.yaml" in by_state["untracked"]
+    # The `.prompts` file is a first-class spec file, not ignored.
+    assert any(
+        ln.rel == "prompts/2026-04-21T11-47-35Z.prompts"
+        and ln.kind == "prompts"
+        and ln.state == "untracked"
+        for ln in lines
+    )
+
+
+def test_push_invariants_rejects_empty():
+    with pytest.raises(InvalidBundleError):
+        assert_push_invariants(Path("/tmp"), {})
+
+
+def test_push_invariants_requires_md():
+    with pytest.raises(InvalidBundleError):
+        assert_push_invariants(Path("/tmp"), {"spec.yaml": "x"})
+
+
+def test_push_invariants_ok():
+    assert_push_invariants(
+        Path("/tmp"),
+        {"spec.yaml": "x", "docs/product.md": "y"},
+    )
+
+
+def test_push_invariants_rejects_md_under_prompts():
+    # `.md` under `prompts/` is a classic copy-paste mistake. Catch it loudly.
+    with pytest.raises(InvalidBundleError) as exc:
+        assert_push_invariants(
+            Path("/tmp"),
+            {
+                "spec.yaml": "x",
+                "docs/product.md": "y",
+                "prompts/scaffold.md": "z",
+            },
+        )
+    assert "prompts/" in str(exc.value)
+
+
+def test_sha256_stable():
+    assert sha256(b"") == sha256(b"")
+    assert sha256(b"hi") != sha256(b"ho")

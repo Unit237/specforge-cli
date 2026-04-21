@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spec-cli"
+version = "0.1.0"
+description = "Git-style CLI for Spec — governed bundles of plain-English source code."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "Spec" }]
+keywords = ["spec", "markdown", "cli", "bundle"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "click>=8.1",
+    "rich>=13.7",
+    "requests>=2.31",
+    "PyYAML>=6.0",
+    # TOML for the `.prompt` format. We use `tomli` for reads to stay on 3.9
+    # (Python 3.11 added `tomllib` to the stdlib) and `tomli-w` for writes —
+    # there's no stdlib TOML writer at any Python version.
+    "tomli>=2.0; python_version < '3.11'",
+    "tomli-w>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.urls]
+Homepage = "https://spec.lightreach.io"
+Source = "https://github.com/spec/spec-cli"
+Issues = "https://github.com/spec/spec-cli/issues"
+
+[project.scripts]
+spec = "spec_cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spec_cli"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
