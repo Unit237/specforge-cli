@@ -11,7 +11,7 @@ Principles:
   - Capture the *call*, never the *payload*. We store tool names and
     small-bounded arg summaries, never file contents, command output,
     diffs, or grep matches.
-  - Truncate every string field. A 32 KiB shell command line is not
+  - Truncate every string field. A multi‑kilobyte shell command line is not
     useful in an audit.
   - Scrub obvious secrets. Defense in depth — users may paste tokens
     into shell commands and we should not help them commit those.

@@ -47,7 +47,10 @@ VALID_OUTCOMES: frozenset[str] = frozenset(
 VALID_VISIBILITIES: frozenset[str] = frozenset({"public", "private"})
 DEFAULT_VISIBILITY: str = "public"
 
-MAX_USER_TEXT_CHARS: int = 32 * 1024  # 32 KiB per turn (validation rule 8).
+# Per-turn `text` cap: user (required) or assistant when `session.verbose` (rule 8).
+# 32 KiB was too small for real captures (pasted logs, big patches). Backed by Text in DB.
+MAX_TURN_TEXT_CHARS: int = 512 * 1024
+MAX_USER_TEXT_CHARS: int = MAX_TURN_TEXT_CHARS  # same cap; kept for API compatibility
 MAX_SUMMARY_CHARS: int = 2000
 MAX_TITLE_CHARS: int = 200
 MAX_LESSON_CHARS: int = 500
@@ -531,9 +534,9 @@ def _parse_turn(raw: Any, *, session_index: int, turn_index: int, verbose: bool)
             raise PromptSchemaError("user turn requires `text`", path=path)
         if not isinstance(text, str):
             raise PromptSchemaError("expected a string", path=f"{path}.text")
-        if len(text) > MAX_USER_TEXT_CHARS:
+        if len(text) > MAX_TURN_TEXT_CHARS:
             raise PromptSchemaError(
-                f"text exceeds {MAX_USER_TEXT_CHARS} chars — split or trim the turn.",
+                f"text exceeds {MAX_TURN_TEXT_CHARS} chars — split or trim the turn.",
                 path=f"{path}.text",
             )
         if summary is not None:
@@ -550,6 +553,15 @@ def _parse_turn(raw: Any, *, session_index: int, turn_index: int, verbose: bool)
             )
         if text is not None and not isinstance(text, str):
             raise PromptSchemaError("expected a string", path=f"{path}.text")
+        if (
+            text is not None
+            and verbose
+            and len(text) > MAX_TURN_TEXT_CHARS
+        ):
+            raise PromptSchemaError(
+                f"text exceeds {MAX_TURN_TEXT_CHARS} chars — split or trim the turn.",
+                path=f"{path}.text",
+            )
         if summary is not None and not isinstance(summary, str):
             raise PromptSchemaError("expected a string", path=f"{path}.summary")
 
@@ -630,9 +642,9 @@ def validate_session(session: Session, *, path: str = "session") -> None:
         if t.role == "user":
             if not t.text:
                 raise PromptSchemaError("user turn requires `text`", path=tpath)
-            if len(t.text) > MAX_USER_TEXT_CHARS:
+            if len(t.text) > MAX_TURN_TEXT_CHARS:
                 raise PromptSchemaError(
-                    f"text exceeds {MAX_USER_TEXT_CHARS} chars", path=f"{tpath}.text"
+                    f"text exceeds {MAX_TURN_TEXT_CHARS} chars", path=f"{tpath}.text"
                 )
             if t.summary is not None:
                 raise PromptSchemaError(
@@ -644,6 +656,14 @@ def validate_session(session: Session, *, path: str = "session") -> None:
                 raise PromptSchemaError(
                     "assistant turn carries `text` but session.verbose is false",
                     path=f"{tpath}.text",
+                )
+            if (
+                t.text is not None
+                and session.verbose
+                and len(t.text) > MAX_TURN_TEXT_CHARS
+            ):
+                raise PromptSchemaError(
+                    f"text exceeds {MAX_TURN_TEXT_CHARS} chars", path=f"{tpath}.text"
                 )
 
         for j, call in enumerate(t.tool_calls):
@@ -710,6 +730,7 @@ __all__ = [
     "VALID_OUTCOMES",
     "VALID_VISIBILITIES",
     "DEFAULT_VISIBILITY",
+    "MAX_TURN_TEXT_CHARS",
     "MAX_USER_TEXT_CHARS",
     "PromptSchemaError",
     "ToolCall",

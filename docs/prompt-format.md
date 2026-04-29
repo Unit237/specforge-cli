@@ -238,7 +238,9 @@ array order; `at` is informational, not structural.
 
 Assistant turns MUST NOT carry `text` unless the session's `verbose` is
 true. Use `summary` for short descriptions; regenerate full text with
-`spec prompts simulate`. User `text` is capped at 32 KiB.
+`spec prompts simulate`. Per-turn `text` (user, or assistant when
+`verbose = true`) is capped (512 KiB in the reference implementation;
+see `MAX_TURN_TEXT_CHARS` in `spec_cli.prompts.schema`).
 
 ### Tool calls
 
@@ -303,8 +305,9 @@ A `.prompts` file is valid iff:
 6. Each session has `id` (non-empty, unique within the file) and
    `source` ∈ `{claude_code, cursor, manual}`.
 7. Each session has at least one `[[turns]]` entry.
-8. Every turn has a `role` in the allowed set; `user` has `text`
-   (≤32 KiB); `assistant` has no `text` unless `verbose = true`.
+8. Every turn has a `role` in the allowed set; `user` has `text` (per-turn
+   cap, 512 KiB in the reference validator); `assistant` has no `text`
+   unless `verbose = true` (same cap on stored `text` when verbose).
 9. `visibility` ∈ `{public, private}` if present (default `public`).
 10. `outcome` ∈ the enum if present.
 11. `tool_calls[].name` is in the allowlist OR dropped with a comment.
