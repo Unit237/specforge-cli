@@ -16,11 +16,28 @@ your machine, under your model / billing relationship.
 
 ## Install
 
+**This project is not published on PyPI under a unique name** — the `spec-cli`
+name on PyPI is taken. End users should never run `pip install spec-cli` to get
+this tool (that installs a different project).
+
+The one-liner (macOS, Linux, WSL):
+
 ```bash
-pip install spec-cli
+curl -LsSf https://spec.lightreach.io/install.sh | sh
 ```
 
-Requires Python 3.9+.
+That installs [`uv`](https://docs.astral.sh/uv) if you don't already have it,
+then drops `spec` on your `PATH` in an isolated environment. Full instructions
+— including a manual path that doesn't pipe into `sh`, and a contributor path
+that installs from a local clone — live at
+[spec.lightreach.io/install](https://spec.lightreach.io/install).
+
+Requires Python 3.9+ (`uv` will fetch one if your system Python is older).
+
+> **Don't `pip install spec-cli`.** The PyPI name `spec-cli` is owned by an
+> unrelated project; `pip install spec-cli` will install someone else's tool,
+> not this one. Install via `uv tool` (above) or the contributor path in the
+> install docs.
 
 Recommended: install [Claude Code](https://claude.ai/code) too. The CLI's
 `compile` flow expects it by default.

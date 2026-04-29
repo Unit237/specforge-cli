@@ -1,35 +1,34 @@
 """
-Google OAuth 2.0 Device Authorization Grant (RFC 8628).
+CLI sign-in via Spec's device-flow broker.
 
-We use device flow because the CLI has to work over SSH and in CI — no
-web-redirect available. The user sees a short code + URL, confirms in a
-browser on any device, and we poll Google's token endpoint until it hands
-us a refresh token.
+Why this isn't Google directly anymore: the device flow grant is a
+public-client OAuth grant that requires a registered client ID. Shipping
+a Spec-owned Google client into every CLI binary means we own a public
+secret forever (the client ID is leaked the moment we publish), can't
+revoke individual sessions without churning the whole client, and have
+to re-implement the wheel for every other identity provider we add.
 
-For v0.1 the Cloud OAuth client ID is embedded. When the real
-Spec Cloud OAuth client is provisioned, swap the `DEFAULT_CLIENT_ID`
-below (or override at runtime via `SPEC_OAUTH_CLIENT_ID`). The client
-secret is not shipped — device flow is a public-client grant.
+So we don't. The CLI talks to **us**. Spec mints both halves of the
+device flow (long random `device_code`, short human-friendly
+`user_code`), tells the user to visit `https://spec.lightreach.io/device`,
+and the web app — which already has a working Google sign-in — links
+the code to the signed-in user. The CLI polls our token endpoint and
+gets back a Spec session JWT. No Google OAuth client ID lives in this
+binary.
+
+Wire format mirrors RFC 8628 because that's already what `requests`-based
+clients expect. Errors come back as ``{"error": "<code>"}`` with codes
+``authorization_pending`` / ``slow_down`` / ``expired_token`` /
+``access_denied``, identical to Google's.
 """
 
 from __future__ import annotations
 
-import os
 import time
 import webbrowser
 from dataclasses import dataclass
 
 import requests
-
-DEVICE_CODE_ENDPOINT = "https://oauth2.googleapis.com/device/code"
-TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
-USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
-
-# Placeholder — replace when the real Cloud OAuth client is issued.
-DEFAULT_CLIENT_ID = "spec-cli.apps.googleusercontent.com"
-
-SCOPES = "openid email profile"
-GRANT_TYPE_DEVICE = "urn:ietf:params:oauth:grant-type:device_code"
 
 
 class AuthError(RuntimeError):
@@ -38,6 +37,14 @@ class AuthError(RuntimeError):
 
 @dataclass
 class DeviceCode:
+    """The pending device-flow handshake.
+
+    `verification_url` always points at the Spec deployment the CLI is
+    talking to — `--api`/`SPEC_API`/the saved credential's `api_base`,
+    in that order. We never embed a hardcoded URL here; the server
+    decides where the user types the code.
+    """
+
     device_code: str
     user_code: str
     verification_url: str
@@ -47,73 +54,100 @@ class DeviceCode:
 
 @dataclass
 class TokenBundle:
+    """What `poll_for_token` returns once the user has approved.
+
+    `user_email` / `user_name` / `user_handle` come back in the same
+    response so the CLI can persist the credential file in one round
+    trip — no second `/auth/me` call.
+    """
+
     access_token: str
-    refresh_token: str | None
-    id_token: str | None
-    expires_in: int
+    user_email: str | None
+    user_name: str | None
+    user_handle: str | None
 
 
-def _client_id() -> str:
-    return os.environ.get("SPEC_OAUTH_CLIENT_ID", DEFAULT_CLIENT_ID)
+def request_device_code(api_base: str) -> DeviceCode:
+    """Open a new device-flow handshake against ``api_base``."""
+    url = api_base.rstrip("/") + "/api/auth/device/code"
+    try:
+        r = requests.post(url, json={}, timeout=30)
+    except requests.RequestException as e:
+        raise AuthError(f"Could not reach Spec at {api_base}: {e}") from e
 
-
-def request_device_code() -> DeviceCode:
-    r = requests.post(
-        DEVICE_CODE_ENDPOINT,
-        data={"client_id": _client_id(), "scope": SCOPES},
-        timeout=30,
-    )
     if r.status_code >= 400:
-        raise AuthError(f"Google device-code request failed: {r.status_code} {r.text}")
+        raise AuthError(
+            f"Spec device-code request failed: {r.status_code} {r.text}"
+        )
     data = r.json()
     return DeviceCode(
         device_code=data["device_code"],
         user_code=data["user_code"],
-        verification_url=data.get("verification_url") or data.get("verification_uri"),
+        verification_url=data.get("verification_uri") or data.get("verification_url"),
         expires_in=int(data.get("expires_in", 600)),
         interval=int(data.get("interval", 5)),
     )
 
 
 def poll_for_token(
+    api_base: str,
     code: DeviceCode,
     *,
     open_browser: bool = True,
     tick=lambda remaining: None,
 ) -> TokenBundle:
-    if open_browser:
+    """Block until the user approves (or the code expires)."""
+    if open_browser and code.verification_url:
         try:
             webbrowser.open_new(code.verification_url)
         except Exception:
+            # `webbrowser.open_new` is best-effort; SSH sessions, headless
+            # CI, and locked-down workstations all fail it. The CLI
+            # already prints the URL — the user can visit it manually.
             pass
 
     deadline = time.time() + code.expires_in
     interval = code.interval
+    token_url = api_base.rstrip("/") + "/api/auth/device/token"
 
     while time.time() < deadline:
         time.sleep(interval)
         tick(int(deadline - time.time()))
 
-        r = requests.post(
-            TOKEN_ENDPOINT,
-            data={
-                "client_id": _client_id(),
-                "device_code": code.device_code,
-                "grant_type": GRANT_TYPE_DEVICE,
-            },
-            timeout=30,
-        )
+        try:
+            r = requests.post(
+                token_url,
+                json={"device_code": code.device_code},
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            # Transient — could be flaky network, server restart. Don't
+            # bail on the user; just keep polling until the device code
+            # itself expires.
+            tick(int(deadline - time.time()))
+            continue
+
         data = r.json() if r.content else {}
 
         if r.status_code == 200:
+            user = (data or {}).get("user") or {}
             return TokenBundle(
                 access_token=data["access_token"],
-                refresh_token=data.get("refresh_token"),
-                id_token=data.get("id_token"),
-                expires_in=int(data.get("expires_in", 3600)),
+                user_email=user.get("email"),
+                user_name=user.get("name"),
+                user_handle=user.get("handle"),
             )
 
-        err = (data or {}).get("error")
+        # Device-flow error envelope: ``{"detail": {"error": "<code>"}}``
+        # (FastAPI nests our HTTPException detail under ``detail``).
+        # Tolerate the un-nested shape too in case a future server
+        # change flattens it.
+        detail = data.get("detail") if isinstance(data, dict) else None
+        if isinstance(detail, dict) and "error" in detail:
+            err = detail.get("error")
+        else:
+            err = (data or {}).get("error")
+
         if err == "authorization_pending":
             continue
         if err == "slow_down":
@@ -126,14 +160,3 @@ def poll_for_token(
         raise AuthError(f"Login failed: {err or r.status_code} {r.text}")
 
     raise AuthError("Login timed out. Run `spec login` again.")
-
-
-def fetch_userinfo(access_token: str) -> dict:
-    r = requests.get(
-        USERINFO_ENDPOINT,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=15,
-    )
-    if r.status_code >= 400:
-        return {}
-    return r.json()

@@ -13,6 +13,7 @@ from ..config import (
     find_bundle_root,
     load_credentials,
     load_manifest,
+    parse_cloud_project,
     parse_remote_url,
 )
 from ..constants import MAX_BATCH_SIZE
@@ -44,7 +45,8 @@ def _chunk(seq, n):
     "--project",
     "-p",
     default=None,
-    help="Override cloud.project in the manifest.",
+    help="Override cloud.project in the manifest. Accepts `<handle>/<slug>` "
+    "or a bare slug (uses your handle from saved credentials).",
 )
 @click.option("--dry-run", is_flag=True, help="Show what would be pushed, don't upload.")
 def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None:
@@ -65,6 +67,9 @@ def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None
     manifest = load_manifest(root)
     idx = load_index(root)
 
+    creds_for_handle = load_credentials()
+    default_handle = creds_for_handle.user_handle if creds_for_handle else None
+
     # Resolve the target: URL wins over --project wins over manifest.
     url_target = None
     if remote_url:
@@ -76,15 +81,20 @@ def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None
         except RemoteUrlError as e:
             fatal(str(e))
             return
-        slug = url_target.slug
+        handle, slug = url_target.handle, url_target.slug
     else:
-        slug = project or manifest.cloud_project
-        if not slug:
+        raw = project or manifest.cloud_project
+        if not raw:
             fatal(
-                "No cloud project configured. Add `cloud.project:` to spec.yaml, "
-                "pass --project <slug>, or push to an explicit URL: "
-                "spec push https://spec.lightreach.io/<slug>"
+                "No cloud project configured. Add `cloud.project: <handle>/<slug>` "
+                "to spec.yaml, pass --project <handle>/<slug>, or push to an "
+                "explicit URL: spec push https://spec.lightreach.io/<handle>/<slug>"
             )
+            return
+        try:
+            handle, slug = parse_cloud_project(raw, default_handle=default_handle)
+        except RemoteUrlError as e:
+            fatal(str(e))
             return
 
     if not idx.staged:
@@ -121,7 +131,7 @@ def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None
             }
         )
 
-    header_target = url_target.raw_url if url_target else slug
+    header_target = url_target.raw_url if url_target else f"{handle}/{slug}"
     git_desc = (
         f"{git.branch}@{git.commit_sha[:7]}"
         if git.branch and git.commit_sha
@@ -161,9 +171,9 @@ def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None
         return
 
     try:
-        project_info = client.resolve_project(slug)
+        project_info = client.resolve_project(handle, slug)
     except ApiError as e:
-        fatal(f"Could not resolve project '{slug}': {e}")
+        fatal(f"Could not resolve project '{handle}/{slug}': {e}")
         return
     project_id = project_info["id"]
 
@@ -178,16 +188,29 @@ def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None
                 fatal(str(e))
                 return
             for row in result.get("results", []):
-                if row.get("status") == "accepted":
+                # Server contract (`BundleFileBatchResult` in
+                # `backend/app/schemas.py`) is `{ok: bool, error: str|null}`.
+                # We tolerate either spelling so an older server speaking
+                # `{status: "accepted"|"rejected", reason: …}` keeps
+                # working — there's no shared package between the two
+                # repos to lock the contract down.
+                ok_flag = row.get("ok")
+                if ok_flag is None:
+                    ok_flag = row.get("status") == "accepted"
+                if ok_flag:
                     total_accepted += 1
-                    rel = row["path"]
-                    # Advance 'pushed' to match what's now on the server.
+                    rel = row.get("path") or (row.get("file") or {}).get("path")
+                    if rel is None:
+                        continue
                     idx.pushed[rel] = sha256(
                         (root / rel).read_bytes()
                     )
                     idx.staged.pop(rel, None)
                 else:
-                    total_rejected.append((row.get("path", "?"), row.get("reason", "rejected")))
+                    reason = row.get("error") or row.get("reason") or "rejected"
+                    total_rejected.append(
+                        (row.get("path") or "?", reason)
+                    )
 
     save_index(idx)
 
@@ -195,6 +218,6 @@ def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None
         reject(f"{path} — {reason}")
 
     if total_accepted:
-        ok(f"Pushed {total_accepted} file(s) to [bold]{slug}[/]")
+        ok(f"Pushed {total_accepted} file(s) to [bold]{handle}/{slug}[/]")
     if total_rejected:
         raise SystemExit(1)

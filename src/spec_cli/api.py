@@ -83,8 +83,31 @@ class CloudClient:
 
     # -- project resolution --------------------------------------------
 
-    def resolve_project(self, slug: str) -> dict[str, Any]:
-        return self._request("GET", f"/api/projects/by-slug/{slug}")
+    def resolve_project(self, handle: str, slug: str) -> dict[str, Any]:
+        """Look up ``<handle>/<slug>`` on Cloud.
+
+        Falls back to the legacy ``/api/projects/by-slug`` endpoint
+        when the server doesn't know about ``by-handle`` yet — keeps
+        new CLIs talking to old servers during a deploy window. The
+        legacy resolver also accepts ``<handle>/<slug>`` as a single
+        slug string, so the fallback is one HTTP round trip, not two.
+        """
+        try:
+            return self._request(
+                "GET", f"/api/projects/by-handle/{handle}/{slug}"
+            )
+        except ApiError as e:
+            if e.status == 404:
+                # Try the back-compat path. A pre-namespacing server
+                # accepts the qualified path as a single slug; the
+                # newer one we already tried is preferred.
+                try:
+                    return self._request(
+                        "GET", f"/api/projects/by-slug/{handle}/{slug}"
+                    )
+                except ApiError:
+                    pass
+            raise
 
     # -- files ---------------------------------------------------------
 

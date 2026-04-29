@@ -13,6 +13,7 @@ from ..config import (
     find_bundle_root,
     load_credentials,
     load_manifest,
+    parse_cloud_project,
     parse_remote_url,
 )
 from ..stage import load_index, save_index, sha256
@@ -47,6 +48,11 @@ def pull_cmd(remote_url: str | None, project: str | None, force: bool) -> None:
 
     manifest = load_manifest(root)
 
+    creds = load_credentials()
+    if not creds or not creds.access_token:
+        fatal("Not signed in. Run `spec login` first.")
+        return
+
     url_target = None
     if remote_url:
         if project:
@@ -57,20 +63,23 @@ def pull_cmd(remote_url: str | None, project: str | None, force: bool) -> None:
         except RemoteUrlError as e:
             fatal(str(e))
             return
-        slug = url_target.slug
+        handle, slug = url_target.handle, url_target.slug
     else:
-        slug = project or manifest.cloud_project
-        if not slug:
+        raw = project or manifest.cloud_project
+        if not raw:
             fatal(
-                "No cloud project configured. Pass --project <slug>, or pull from "
-                "an explicit URL: spec pull https://spec.lightreach.io/<slug>"
+                "No cloud project configured. Pass --project <handle>/<slug>, "
+                "or pull from an explicit URL: "
+                "spec pull https://spec.lightreach.io/<handle>/<slug>"
             )
             return
-
-    creds = load_credentials()
-    if not creds or not creds.access_token:
-        fatal("Not signed in. Run `spec login` first.")
-        return
+        try:
+            handle, slug = parse_cloud_project(
+                raw, default_handle=creds.user_handle
+            )
+        except RemoteUrlError as e:
+            fatal(str(e))
+            return
 
     if url_target and url_target.api_base.rstrip("/") != creds.api_base.rstrip("/"):
         warn(
@@ -82,7 +91,7 @@ def pull_cmd(remote_url: str | None, project: str | None, force: bool) -> None:
 
     try:
         client = CloudClient(creds)
-        project_info = client.resolve_project(slug)
+        project_info = client.resolve_project(handle, slug)
         remote_files = client.list_files(
             project_info["id"], include_content=True
         )
