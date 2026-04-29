@@ -12,6 +12,8 @@ from ..config import (
     find_bundle_root,
     load_credentials,
     load_manifest,
+    parse_cloud_project,
+    RemoteUrlError,
 )
 from ..ui import console, dim, fatal
 
@@ -39,8 +41,8 @@ def log_cmd(project: str | None, limit: int) -> None:
         return
 
     manifest = load_manifest(root)
-    slug = project or manifest.cloud_project
-    if not slug:
+    raw_project = project or manifest.cloud_project
+    if not raw_project:
         fatal("No cloud project configured.")
         return
 
@@ -49,9 +51,18 @@ def log_cmd(project: str | None, limit: int) -> None:
         fatal("Not signed in. Run `spec login` first.")
         return
 
+    default_handle = creds.user_handle
+    try:
+        handle, slug = parse_cloud_project(
+            raw_project, default_handle=default_handle
+        )
+    except RemoteUrlError as e:
+        fatal(str(e))
+        return
+
     try:
         client = CloudClient(creds)
-        info_ = client.resolve_project(slug)
+        info_ = client.resolve_project(handle, slug)
         entries = client.get_log(info_["id"])
     except ApiError as e:
         fatal(str(e))

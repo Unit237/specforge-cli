@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Iterable
+from urllib.parse import quote
 
 import requests
 
@@ -83,6 +84,18 @@ class CloudClient:
 
     # -- project resolution --------------------------------------------
 
+    @staticmethod
+    def _as_project_out(data: Any) -> dict[str, Any]:
+        if isinstance(data, dict) and "id" in data:
+            return data
+        raise ApiError(
+            "Cloud returned an unexpected project response (expected a JSON object "
+            "with an `id` field). "
+            "This often means the request hit a non-API page (HTML or plain text) — "
+            "check `api_base` in `~/.spec/credentials` and the Spec API URL. "
+            f"Got: {type(data).__name__}."
+        )
+
     def resolve_project(self, handle: str, slug: str) -> dict[str, Any]:
         """Look up ``<handle>/<slug>`` on Cloud.
 
@@ -90,21 +103,24 @@ class CloudClient:
         when the server doesn't know about ``by-handle`` yet — keeps
         new CLIs talking to old servers during a deploy window. The
         legacy resolver also accepts ``<handle>/<slug>`` as a single
-        slug string, so the fallback is one HTTP round trip, not two.
+        path segment: ``/by-slug/{encode("h/s")}`` so ``h/s`` is one
+        slug, not two extra path segments.
         """
         try:
-            return self._request(
+            raw = self._request(
                 "GET", f"/api/projects/by-handle/{handle}/{slug}"
             )
+            return self._as_project_out(raw)
         except ApiError as e:
             if e.status == 404:
                 # Try the back-compat path. A pre-namespacing server
-                # accepts the qualified path as a single slug; the
-                # newer one we already tried is preferred.
+                # accepts the qualified slug as a single path segment
+                # (`jon%2Fspec` not `.../by-slug/jon/spec`, which 404s).
+                qualified = f"{handle}/{slug}"
                 try:
-                    return self._request(
-                        "GET", f"/api/projects/by-slug/{handle}/{slug}"
-                    )
+                    path = f"/api/projects/by-slug/{quote(qualified, safe='')}"
+                    raw = self._request("GET", path)
+                    return self._as_project_out(raw)
                 except ApiError:
                     pass
             raise

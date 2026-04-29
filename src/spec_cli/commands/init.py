@@ -325,6 +325,34 @@ def _chmod_executable(path: Path) -> None:
         pass
 
 
+def _stage_scaffold_for_push(
+    root: Path,
+    *,
+    wrote_prompts: bool,
+    starter_prompts_name: str,
+    agents_written: bool,
+) -> list[str]:
+    """Hash-and-record scaffolded spec files so `spec push` does not
+    require a redundant `spec add spec.yaml` after a fresh `spec init`."""
+    from ..stage import load_index, save_index, sha256
+
+    rels: list[str] = [MANIFEST_FILENAME, "docs/product.md"]
+    if wrote_prompts:
+        rels.append(f"{PROMPTS_DIRNAME}/{starter_prompts_name}")
+    if agents_written:
+        rels.append(AGENTS_FILENAME)
+    idx = load_index(root)
+    staged: list[str] = []
+    for rel in rels:
+        p = root / rel
+        if p.is_file():
+            idx.staged[rel] = sha256(p.read_bytes())
+            staged.append(rel)
+    if staged:
+        save_index(idx)
+    return staged
+
+
 @click.command("init")
 @click.option("--name", "-n", default=None, help="Bundle name (defaults to directory name).")
 @click.option("--force", is_flag=True, help="Overwrite an existing spec.yaml.")
@@ -390,6 +418,13 @@ def init_cmd(name: str | None, force: bool, skip_git_hook: bool) -> None:
             info("")
             dim(f"Could not install post-commit hook ({e}). Skipping.")
 
+    auto_staged = _stage_scaffold_for_push(
+        root,
+        wrote_prompts=wrote_prompts,
+        starter_prompts_name=starter_prompts_name,
+        agents_written=agents_written,
+    )
+
     ok(f"Initialized bundle [bold]{bundle_name}[/] in {root}")
     pointer("manifest    ", str(manifest_path.relative_to(root)))
     pointer("entry       ", "docs/product.md")
@@ -400,6 +435,11 @@ def init_cmd(name: str | None, force: bool, skip_git_hook: bool) -> None:
         pointer("agents      ", "AGENTS.md")
     else:
         dim("AGENTS.md already exists — left untouched.")
+
+    if auto_staged:
+        dim(
+            "Staged for `spec push`: " + ", ".join(auto_staged) + "."
+        )
 
     if hook_status and hook_path is not None:
         rel = hook_path.relative_to(root) if hook_path.is_relative_to(root) else hook_path

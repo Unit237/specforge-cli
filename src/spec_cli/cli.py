@@ -13,6 +13,7 @@ from .commands.login import login_cmd, logout_cmd
 from .commands.prompts import prompts_group
 from .commands.pull import pull_cmd
 from .commands.push import push_cmd
+from .commands.unstage import unstage_cmd
 from .commands.status import status_cmd
 
 
@@ -36,6 +37,7 @@ cli.add_command(login_cmd)
 cli.add_command(logout_cmd)
 cli.add_command(status_cmd)
 cli.add_command(add_cmd)
+cli.add_command(unstage_cmd)
 cli.add_command(push_cmd)
 cli.add_command(pull_cmd)
 cli.add_command(compile_cmd)

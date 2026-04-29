@@ -196,7 +196,11 @@ def assert_push_invariants(root: Path, staged: dict[str, str]) -> None:
             raise InvalidBundleError(
                 f"{rel} — `.md` files are not allowed inside `{PROMPTS_DIRNAME}/`. "
                 "Prompts live in `.prompts` files (plural). Move the file, "
-                "or run `spec prompts capture` to write a fresh one."
+                "or run `spec prompts capture` to write a fresh one.\n\n"
+                "That path is still in your staged set from an earlier `spec add`, "
+                "so the next `spec push` includes it even if you only just staged "
+                "a different file. Run `spec status` to list staged paths, then "
+                f"`spec unstage {rel}` to drop it (or unstage a whole directory)."
             )
 
     md_count = sum(
