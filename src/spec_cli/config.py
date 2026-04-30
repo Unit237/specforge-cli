@@ -48,6 +48,42 @@ class Manifest:
         return cloud.get("project")
 
     @property
+    def cloud_bundle_id(self) -> str | None:
+        """Stable, server-minted bundle identity (``cloud.bundle_id`` in
+        ``spec.yaml``).
+
+        This is the half of the manifest the user *cannot* sensibly
+        edit — it's stamped by the CLI on the first successful push and
+        verified on every subsequent push so a working tree bound to
+        bundle A can never be retargeted to bundle B by editing
+        ``cloud.project``. ``None`` when missing — older manifests
+        won't carry it, and the first-push adoption flow is what fills
+        it in. See ``ensure_bundle_id_binding`` for the verify/adopt
+        logic and PLAN.md §11 for the design rationale.
+        """
+        cloud = self.data.get("cloud") or {}
+        value = cloud.get("bundle_id")
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    def set_cloud_bundle_id(self, bundle_id: str) -> None:
+        """Write ``cloud.bundle_id`` into the in-memory manifest.
+
+        Caller is responsible for persisting via ``dump_manifest``. We
+        keep the mutation explicit (no auto-save) so the push pipeline
+        can decide *when* the on-disk file changes — the adopt-on-first-
+        push flow only writes after the upload succeeds, so a failed
+        push doesn't leave the manifest in a confusing half-bound state.
+        """
+        cloud = self.data.get("cloud")
+        if not isinstance(cloud, dict):
+            cloud = {}
+            self.data["cloud"] = cloud
+        cloud["bundle_id"] = bundle_id
+
+    @property
     def root(self) -> Path:
         return self.path.parent
 

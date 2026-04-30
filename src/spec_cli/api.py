@@ -167,7 +167,11 @@ class CloudClient:
         )
 
     def batch_upload(
-        self, project_id: int, items: Iterable[dict[str, Any]]
+        self,
+        project_id: int,
+        items: Iterable[dict[str, Any]],
+        *,
+        bundle_id: str | None = None,
     ) -> dict[str, Any]:
         """
         `items` are {"path": str, "content": str, "branch": str|None,
@@ -175,11 +179,21 @@ class CloudClient:
         (constants.MAX_BATCH_SIZE); callers should chunk. `branch` and
         `commit_sha` come from the caller's git worktree and are persisted
         on every file row so the Cloud UI can render per-file git history.
+
+        ``bundle_id`` (PLAN.md §11) is the working tree's bound bundle
+        identity, copied from ``cloud.bundle_id`` in ``spec.yaml``. When
+        present, the server compares it against the resolved project's
+        immutable id and returns ``409`` if they differ — that's the
+        durable backstop against retargeting a working tree at the wrong
+        bundle. Older servers ignore the field (forward-compatible).
         """
+        payload: dict[str, Any] = {"files": list(items)}
+        if bundle_id is not None:
+            payload["bundle_id"] = bundle_id
         return self._request(
             "POST",
             f"/api/projects/{project_id}/files/batch",
-            json={"files": list(items)},
+            json=payload,
         )
 
     def file_history(self, project_id: int, path: str) -> list[dict[str, Any]]:

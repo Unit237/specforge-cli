@@ -221,6 +221,10 @@ approvals:
 
 cloud:
   project: {name}
+  # `bundle_id:` is stamped here automatically on the first successful
+  # `spec push` (PLAN.md §11). Once set, every push verifies it against
+  # the remote — pointing `cloud.project` at an unrelated bundle by
+  # accident is then a hard refusal, not a silent overwrite.
 """
 
 

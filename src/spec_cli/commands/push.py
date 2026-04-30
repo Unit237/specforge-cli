@@ -10,6 +10,7 @@ from ..api import ApiError, CloudClient
 from ..config import (
     BundleNotFoundError,
     RemoteUrlError,
+    dump_manifest,
     find_bundle_root,
     load_credentials,
     load_manifest,
@@ -238,14 +239,86 @@ def push_cmd(
         return
     project_id = project_info["id"]
 
+    # Bundle-identity binding (PLAN.md §11). Three flows:
+    #
+    #   1. Local + remote both set, match → push proceeds.
+    #   2. Local + remote both set, mismatch → fatal pre-flight refusal
+    #      (the server's 409 is the durable backstop, but failing here
+    #      means we never upload a single byte to the wrong bundle).
+    #   3. Local unset, remote set → first-push adoption: stamp the
+    #      remote's bundle_id into spec.yaml after a successful push so
+    #      every subsequent push verifies. Older servers without
+    #      bundle_id in the response simply skip this — manifest stays
+    #      as-is and the new check is a no-op.
+    #
+    # We deliberately read the manifest field *here* rather than passing
+    # it down: the local value can be missing, blank, or junk, and we
+    # want a single point that decides what to do.
+    local_bundle_id = manifest.cloud_bundle_id
+    remote_bundle_id = project_info.get("bundle_id")
+    if (
+        local_bundle_id
+        and remote_bundle_id
+        and local_bundle_id != remote_bundle_id
+    ):
+        ui_host = creds.api_base.rstrip("/")
+        fatal(
+            f"Bundle mismatch — refusing to push.\n"
+            f"  This working tree is bound to bundle `{local_bundle_id}`,\n"
+            f"  but `{handle}/{slug}` at {ui_host} is bundle "
+            f"`{remote_bundle_id}`.\n"
+            f"  These are two different bundles; pushing one's content "
+            f"into the other would mix them.\n\n"
+            f"  Pick one of:\n"
+            f"    · push to the original bundle this tree was bound to,\n"
+            f"    · run `spec init` in a fresh directory to start a new "
+            f"working tree for `{handle}/{slug}`,\n"
+            f"    · or, if you really mean to retarget this tree, edit "
+            f"`cloud.bundle_id` in spec.yaml to `{remote_bundle_id}` "
+            f"deliberately."
+        )
+        return
+
     total_accepted = 0
     total_rejected: list[tuple[str, str]] = []
+
+    # Forward the bundle id we have (local takes precedence, since the
+    # server hasn't re-validated yet at this point — but it'll match the
+    # remote on every subsequent push). Falling back to the remote's id
+    # on first push is what makes the in-flight assertion non-empty even
+    # before we've stamped the manifest, so the server's 409 path stays
+    # exercised on the very first batch.
+    push_bundle_id = local_bundle_id or (
+        remote_bundle_id if isinstance(remote_bundle_id, str) else None
+    )
 
     with console.status("[sf.muted]Uploading…[/]", spinner="dots"):
         for chunk in _chunk(payload, MAX_BATCH_SIZE):
             try:
-                result = client.batch_upload(project_id, chunk)
+                result = client.batch_upload(
+                    project_id, chunk, bundle_id=push_bundle_id
+                )
             except ApiError as e:
+                # Surface the server-side bundle-identity mismatch as a
+                # readable, actionable error rather than the raw 409 body.
+                # This path is hit when the local and remote both exist and
+                # disagree, but the local value was added/edited *after*
+                # we computed `local_bundle_id` (e.g. another tool wrote
+                # to the manifest mid-push) — rare, but the durable
+                # backstop deserves a clean message too.
+                if e.status == 409 and isinstance(e.body, dict):
+                    detail = e.body.get("detail")
+                    if isinstance(detail, dict) and detail.get("error") == "bundle_id_mismatch":
+                        expected = detail.get("expected")
+                        got = detail.get("got")
+                        fatal(
+                            f"Server refused the push: bundle mismatch.\n"
+                            f"  Working tree asserts bundle `{got}`,\n"
+                            f"  but `{handle}/{slug}` is bundle `{expected}`.\n"
+                            f"  Update `cloud.bundle_id` in spec.yaml or "
+                            f"point at the right remote."
+                        )
+                        return
                 fatal(str(e))
                 return
             for row in result.get("results", []):
@@ -280,6 +353,33 @@ def push_cmd(
 
     if total_accepted:
         ok(f"Pushed {total_accepted} file(s) to [bold]{handle}/{slug}[/]")
+
+    # First-push adoption (PLAN.md §11). When the working tree didn't
+    # carry a bundle_id but the server did return one, stamp it now so
+    # the next push verifies against this concrete identity. We only
+    # write after a successful upload — a failed push leaves the
+    # manifest untouched. The bundle_id never changes for the lifetime
+    # of the bundle, so this runs exactly once per working tree.
+    if (
+        total_accepted
+        and not local_bundle_id
+        and isinstance(remote_bundle_id, str)
+        and remote_bundle_id
+    ):
+        try:
+            manifest.set_cloud_bundle_id(remote_bundle_id)
+            dump_manifest(manifest)
+            dim(
+                f"Bound this working tree to bundle "
+                f"[bold]{remote_bundle_id}[/]. "
+                f"`cloud.bundle_id` written to spec.yaml."
+            )
+        except OSError as e:
+            warn(
+                f"Push succeeded but couldn't write `cloud.bundle_id` to "
+                f"spec.yaml ({e}). Add it manually to lock this working "
+                f"tree to bundle `{remote_bundle_id}`."
+            )
 
     # Auto-open a branch review on non-trunk pushes. The server upserts
     # by (project, branch, status='open'), so calling this on every
