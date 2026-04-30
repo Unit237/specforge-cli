@@ -83,6 +83,30 @@ _SESSION_ALLOWED_KEYS: frozenset[str] = frozenset(
         "forked_from",
         "paths_touched",
         "verbose",
+        # Per-session commit context. When the file holds sessions from
+        # many commits on the same branch (the post-v0.2 default), this
+        # block carries each session's own commit attribution. The
+        # file-level [commit] still records the *branch* identity, but
+        # individual sessions point at their own SHAs through here.
+        "commit",
+        # Review provenance. Set when the session's branch was merged
+        # into trunk through a Cloud branch review — the green-dot
+        # signal in the trunk prompts file UI. None on direct-to-trunk
+        # captures (no review involved) and on unmerged branches.
+        "merged_from",  # str — name of the branch the session merged from
+        "merged_at",    # datetime — when the merge happened
+        "approved_by",  # str — handle / email of who approved the review
+    }
+)
+_SESSION_COMMIT_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {
+        "branch",
+        "commit_sha",
+        "message",
+        "committed_at",
+        "author_name",
+        "author_email",
+        "author_username",
     }
 )
 _EDIT_ALLOWED_KEYS: frozenset[str] = frozenset(
@@ -128,6 +152,27 @@ class Turn:
 
 
 @dataclass
+class SessionCommit:
+    """Per-session commit context.
+
+    A `.prompts` file under the v0.2+ "one file per branch" shape can
+    hold sessions from many commits — each commit on the branch gets
+    its own `[sessions.commit]` block so attribution is preserved.
+    The file-level `[commit]` continues to record the *branch* identity
+    (which is the one piece of data that is constant across every
+    session in the file).
+    """
+
+    branch: str | None = None
+    commit_sha: str | None = None
+    message: str | None = None
+    committed_at: datetime | None = None
+    author_name: str | None = None
+    author_email: str | None = None
+    author_username: str | None = None
+
+
+@dataclass
 class Session:
     """One conversational session. Many of these ride inside a single
     `.prompts` file."""
@@ -157,6 +202,18 @@ class Session:
 
     # When true, assistant turns may carry `text`
     verbose: bool = False
+
+    # Per-session commit context (v0.2+). None on legacy files where
+    # the file-level [commit] block carried this for the only commit.
+    commit: SessionCommit | None = None
+
+    # Review provenance — the "green dot" signal. Set ONLY when the
+    # session arrived on trunk's prompts file via a Cloud branch
+    # review merge. Direct-to-trunk captures and unmerged branch
+    # captures all leave these None.
+    merged_from: str | None = None
+    merged_at: datetime | None = None
+    approved_by: str | None = None
 
 
 @dataclass
@@ -407,6 +464,13 @@ def _parse_session(raw: Any, *, index: int) -> Session:
     if not isinstance(verbose_raw, bool):
         raise PromptSchemaError("expected a boolean", path=f"{path}.verbose")
 
+    merged_at_raw = raw.get("merged_at")
+    merged_at = (
+        _as_utc_datetime(merged_at_raw, path=f"{path}.merged_at")
+        if merged_at_raw is not None
+        else None
+    )
+
     session = Session(
         id=sid,
         source=source,
@@ -436,11 +500,57 @@ def _parse_session(raw: Any, *, index: int) -> Session:
         paths_touched=_optional_str_list(
             raw.get("paths_touched"), path=f"{path}.paths_touched"
         ),
+        commit=_parse_session_commit(
+            raw.get("commit"), path=f"{path}.commit"
+        ),
+        merged_from=_optional_str(
+            raw.get("merged_from"), path=f"{path}.merged_from"
+        ),
+        merged_at=merged_at,
+        approved_by=_optional_str(
+            raw.get("approved_by"), path=f"{path}.approved_by"
+        ),
     )
     session.turns = _parse_turns(
         raw.get("turns"), session_index=index, verbose=session.verbose
     )
     return session
+
+
+def _parse_session_commit(raw: Any, *, path: str) -> SessionCommit | None:
+    """Parse the optional `[sessions.commit]` block on a session.
+
+    Every field is nullable — a session can carry just `commit_sha`
+    when its branch identity comes from the file-level `[commit]`,
+    or omit `[sessions.commit]` entirely on legacy single-commit
+    files.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise PromptSchemaError("expected a table", path=path)
+    _reject_unknown_keys(raw, _SESSION_COMMIT_ALLOWED_KEYS, path=path)
+    committed_at_raw = raw.get("committed_at")
+    committed_at = (
+        _as_utc_datetime(committed_at_raw, path=f"{path}.committed_at")
+        if committed_at_raw is not None
+        else None
+    )
+    return SessionCommit(
+        branch=_optional_str(raw.get("branch"), path=f"{path}.branch"),
+        commit_sha=_optional_str(raw.get("commit_sha"), path=f"{path}.commit_sha"),
+        message=_optional_str(raw.get("message"), path=f"{path}.message"),
+        committed_at=committed_at,
+        author_name=_optional_str(
+            raw.get("author_name"), path=f"{path}.author_name"
+        ),
+        author_email=_optional_str(
+            raw.get("author_email"), path=f"{path}.author_email"
+        ),
+        author_username=_optional_str(
+            raw.get("author_username"), path=f"{path}.author_username"
+        ),
+    )
 
 
 def _parse_edits(raw: Any) -> list[PromptsEdit]:
@@ -736,6 +846,7 @@ __all__ = [
     "ToolCall",
     "Turn",
     "Session",
+    "SessionCommit",
     "CommitMeta",
     "PromptsEdit",
     "PromptsFile",

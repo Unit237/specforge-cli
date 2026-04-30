@@ -1,11 +1,14 @@
 # The `.prompts` file format
 
-> **Schema:** `spec.prompts/v0.1`
+> **Schema:** `spec.prompts/v0.1` (file shape) · **Layout:** v0.2 (one file per branch)
 > **Status:** draft — the contract is not yet stable. Review and argue
 > here before code lands.
 
-A `.prompts` file bundles the conversational **sessions** that produced a
-single commit into one immutable, human-readable TOML artifact.
+A `.prompts` file bundles the conversational **sessions** captured on a
+git branch into one human-readable TOML artifact. Trunk has one such
+file (`prompts/main.prompts`). Each non-trunk branch has its own draft
+file under a slugged version of the branch name. `spec prompts capture`
+appends new sessions into the current branch's file idempotently.
 
 `.prompts` files are treated as **build inputs**, not telemetry. Editing
 one changes what the compiler sees on the next run. That is the whole
@@ -17,76 +20,96 @@ Prompts are a **first-class class of source**, not markdown in disguise.
 
 ---
 
-## One file per commit
+## One file per branch (v0.2)
 
-The central rule. Each time an engineer commits, the `.prompts` artifact
-for that commit lives at:
+The central rule. The `.prompts` file for a branch lives at:
 
 ```
-<bundle-root>/prompts/captured/<ISO8601-seconds-Z>.prompts
+<bundle-root>/prompts/<branch-slug>.prompts
 ```
 
-Filename is a UTC timestamp to second precision with `:` replaced by
-`-`, e.g. `prompts/captured/2026-04-21T11-47-35Z.prompts`. No commit SHA
-in the filename — the commit that introduced the file is discoverable
-via `git log --diff-filter=A -- prompts/captured/<name>.prompts`.
-Timestamp is generated when the CLI writes the file, not when sessions
-started. Files in `prompts/` without a subdirectory predate the tier
-split and are still accepted; new captures always land in `captured/`.
+The slug is the branch name, lowercased, with anything outside
+`[a-z0-9._-]` (including `/`) collapsed to a single `-`, leading and
+trailing `.` / `-` stripped. So:
 
-Files accumulate. A long-lived bundle has hundreds of `.prompts` files
-— that's the corpus engineers learn from. No rewriting, no GC,
-no `.prompts/index` file.
+| Branch                       | File                                  |
+| ---------------------------- | ------------------------------------- |
+| `main`                       | `prompts/main.prompts`                |
+| `feature/billing-rewrite`    | `prompts/feature-billing-rewrite.prompts` |
+| `dependabot/npm/foo-1.2.3`   | `prompts/dependabot-npm-foo-1.2.3.prompts` |
 
-### Why many files instead of one
+The original branch name (with case / `/` / non-ASCII intact) is
+preserved in `[commit].branch` and on every session's
+`[sessions.commit].branch`, so the slug is just a stable filesystem
+handle, not a reversible encoding.
 
-- **Immutable history.** Each commit's conversational record is a real
-  file on disk that a human can open, review, diff, and link to.
-- **Review-friendly diffs.** The diff of a commit shows the new
-  `.prompts` file inline, right next to the `.md` changes it produced.
-- **Feed-ready.** `/prompts` (the public feed, spec'd elsewhere) reads
-  the accumulated corpus by walking bundles' `prompts/*.prompts` files.
-- **No write-lock races.** Two commits back-to-back never touch the
-  same `.prompts` file.
+`spec prompts capture` is **append-only**. New sessions go into the
+current branch's file in `started_at` order; sessions whose `id` is
+already present are dropped. Re-running capture is safe and produces
+byte-identical output. The branch's prior captured files (under
+`prompts/captured/<timestamp>.prompts` from the v0.1 era) are still
+accepted by every parser; new captures land at the root of `prompts/`.
+
+### Why one file per branch
+
+- **One narrative per branch.** A reviewer reading a draft branch sees
+  the unmerged thinking in *one* file with a stable name, not a
+  forensic crawl through a directory of timestamped envelopes.
+- **PR-shaped review by construction.** The diff between a branch's
+  prompts file and trunk's is exactly the unmerged delta — same
+  shape every engineer already knows from GitHub.
+- **Cloud merges by appending.** Approving a branch review promotes
+  every session in the branch's file into trunk's file with
+  `merged_from` / `merged_at` / `approved_by` stamped on each one.
+  The trunk file is the canonical, accumulated record. The branch
+  file stays on the branch under its own slug for history.
+- **Append-only diffs.** The trunk file only ever grows; merges never
+  reorder existing sessions. Two reviews touching the same session id
+  collapse cleanly (idempotent dedup).
+- **Feed-ready.** `/prompts` (the public feed) walks each bundle's
+  trunk prompts file. The "Reviewed only" filter keys off
+  `merged_from` to surface just the green-lit thinking.
 
 ---
 
-## Bundle layout
+## Bundle layout (v0.2)
 
 ```
 my-bundle/
-├── spec.yaml                # exactly 1 · manifest
+├── spec.yaml                          # exactly 1 · manifest
 ├── docs/
-│   ├── product.md                # specs — English-language source
+│   ├── product.md                          # specs — English-language source
 │   └── auth.md
 └── prompts/
-    ├── captured/                 # auto-captured scrollback · advisory context
-    │   └── 2026-04-21T11-47-35Z.prompts
-    ├── curated/                  # reviewer-approved · authoritative context
-    │   ├── 2026-04-20T15-33-47Z.prompts
-    │   └── _pending/             # awaiting review · excluded from compile
-    │       └── 2026-04-21T11-47-35Z.prompts
-    └── 2026-04-18T09-12-04Z.prompts   # legacy — grandfathered as curated
+    ├── main.prompts                        # trunk · accumulated narrative
+    ├── feature-billing-rewrite.prompts     # one .prompts per non-trunk branch
+    └── feature-auth.prompts
 ```
 
-### The two tiers, and why
+The branch-file convention is the primary path. The legacy
+`prompts/captured/` / `prompts/curated/` / `prompts/curated/_pending/`
+tiers from v0.1 are still accepted by every parser — bundles that
+predate v0.2 keep working untouched — but new captures always go to
+the per-branch file at the root. Cloud's branch-merge is the canonical
+path from "my draft branch" to "on trunk".
 
-`.prompts` files have two populations that deserve very different review
-treatment, so they live in two places:
+### Legacy tiers (pre-v0.2)
 
-| Tier        | Directory                           | Written by              | Compiler treats as        | Reviewed?                              |
-| ----------- | ----------------------------------- | ----------------------- | ------------------------- | -------------------------------------- |
-| `captured`  | `prompts/captured/`                 | `prompts capture`       | advisory scrollback        | No — noise goes in, nothing is gated   |
-| `curated`   | `prompts/curated/`                  | `prompts review` accept | first-class intent         | Yes — a human must accept each file    |
-| `pending`   | `prompts/curated/_pending/`         | `prompts submit`        | excluded entirely          | In-flight — blocks merge until resolved |
-| `legacy`    | `prompts/` (root, no subdirectory)  | pre-tier capture        | treated as curated         | Grandfathered                          |
+`.prompts` files in v0.1 lived in two populations that deserved very
+different review treatment, in two directories:
 
-Captured prompts exist to give the compiler context it would otherwise
-lack (why the previous commit did what it did, which dead-ends were
-tried). They are unreviewed scrollback — the compiler must read them
-that way. Curated prompts, by contrast, are intent a reviewer has
-signed off on; the compiler may rely on them as much as it relies on
-the specs.
+| Tier        | Directory                           | Written by              | Compiler treats as        |
+| ----------- | ----------------------------------- | ----------------------- | ------------------------- |
+| `captured`  | `prompts/captured/`                 | `prompts capture` (v0.1) | advisory scrollback        |
+| `curated`   | `prompts/curated/`                  | `prompts review` accept | first-class intent         |
+| `pending`   | `prompts/curated/_pending/`         | `prompts submit`        | excluded entirely          |
+| `legacy`    | `prompts/` (root, no subdirectory)  | pre-tier capture        | treated as curated         |
+
+In v0.2 the local `submit` / `review` / `accept` workflow is no longer
+the canonical path — Cloud branch reviews are. The legacy CLI commands
+still work for users without Cloud, but they target the older
+`prompts/captured/` directory and don't touch the per-branch files at
+the root. The two coexist; neither blocks the other.
 
 Three file classes. No overlap:
 
@@ -221,9 +244,44 @@ Public-facing UI (cards, feed, permalinks) only ever shows
 | `forked_from`| no       | `id` of an ancestor session, if any                                    |
 | `paths_touched` | no    | string array; populated from tool-call `args.path` on write            |
 | `verbose`    | no       | boolean; when true, assistant turns may carry `text`                   |
+| `merged_from`| no       | branch name a session was merged from (set by Cloud at merge time)     |
+| `merged_at`  | no       | UTC RFC-3339; when the session landed on trunk via review              |
+| `approved_by`| no       | reviewer handle / email who clicked "Merge into trunk"                 |
+
+The `merged_from` / `merged_at` / `approved_by` trio is the
+*review provenance* signal. They're set ONLY by Cloud's branch-merge
+endpoint when a reviewed branch's session is appended into trunk's
+prompts file — never by `spec prompts capture`. Sessions in trunk's
+file with these fields populated render with the green-dot
+"reviewed" chip in the feed UI; sessions without them are
+direct-to-trunk captures and stay un-flagged. They're idempotent:
+re-running merge on a session that's already stamped leaves the
+existing values alone, so the original review attribution is never
+overwritten.
 
 All author-written fields stay author-written — the Cloud backend
-never synthesises `title`, `summary`, `lesson`, or `outcome`.
+never synthesises `title`, `summary`, `lesson`, or `outcome`. The
+review provenance fields are the one exception: they're written by
+Cloud, not the author.
+
+### `[sessions.commit]` — optional, per-session
+
+A v0.2 branch file accumulates many commits over time, so each
+session can carry its own commit context. The fields mirror the
+file-level `[commit]` block plus a `commit_sha`:
+
+| Field             | Notes                                                  |
+| ----------------- | ------------------------------------------------------ |
+| `branch`          | branch name as known to git at capture time           |
+| `commit_sha`      | commit the session was captured against               |
+| `committed_at`    | UTC RFC-3339; commit timestamp                        |
+| `message`         | commit message subject (optional)                      |
+| `author_name`     | `git config user.name` at capture time                |
+| `author_email`    | `git config user.email` at capture time               |
+| `author_username` | Cloud handle if known                                  |
+
+The block is omitted entirely when every field is `None` (typical on
+files written before v0.2 introduced per-session attribution).
 
 ### `[[sessions.turns]]`
 

@@ -25,6 +25,7 @@ from .schema import (
     PromptsEdit,
     PromptsFile,
     Session,
+    SessionCommit,
     ToolCall,
     Turn,
     validate_prompts_file,
@@ -182,6 +183,10 @@ def _render_commit(commit: CommitMeta) -> list[str]:
 
 
 # Fixed order for [[sessions]] fields — part of the contract.
+# `commit` (the per-session [sessions.commit] sub-table) and the merge
+# provenance fields (`merged_from`, `merged_at`, `approved_by`) are
+# rendered after this scalar header in their own emitter, so they're
+# absent here on purpose.
 _SESSION_FIELD_ORDER: tuple[str, ...] = (
     "id",
     "source",
@@ -199,10 +204,26 @@ _SESSION_FIELD_ORDER: tuple[str, ...] = (
     "forked_from",
     "paths_touched",
     "verbose",
+    "merged_from",
+    "merged_at",
+    "approved_by",
 )
 
 # Fields that need multi-line string treatment when long.
 _SESSION_TEXT_FIELDS: frozenset[str] = frozenset({"summary", "lesson", "title"})
+
+# Fixed order for [sessions.commit] fields — same shape as the
+# file-level [commit] block, plus `commit_sha` since per-session
+# commits know which commit they came from.
+_SESSION_COMMIT_FIELD_ORDER: tuple[str, ...] = (
+    "branch",
+    "commit_sha",
+    "message",
+    "committed_at",
+    "author_name",
+    "author_email",
+    "author_username",
+)
 
 
 def _render_session_header(session: Session) -> list[str]:
@@ -232,6 +253,26 @@ def _render_session_header(session: Session) -> list[str]:
             lines.append(_render_text_field(field_name, value))
         else:
             lines.append(f"{field_name} = {_basic_quote(value)}")
+    return lines
+
+
+def _render_session_commit(commit: SessionCommit) -> list[str]:
+    """Render the optional `[sessions.commit]` sub-table for a session.
+
+    Skipped entirely when every field is None — minimises noise on
+    sessions where the file-level `[commit]` carries everything.
+    """
+    if all(getattr(commit, f) is None for f in _SESSION_COMMIT_FIELD_ORDER):
+        return []
+    lines: list[str] = ["  [sessions.commit]"]
+    for field_name in _SESSION_COMMIT_FIELD_ORDER:
+        value = getattr(commit, field_name)
+        if value is None:
+            continue
+        if isinstance(value, datetime):
+            lines.append(f"  {field_name} = {_iso_z(value)}")
+        else:
+            lines.append(f"  {field_name} = {_basic_quote(value)}")
     return lines
 
 
@@ -309,6 +350,11 @@ def render_prompts_file(pf: PromptsFile) -> str:
     for session in ordered:
         out.append("")
         out.extend(_render_session_header(session))
+        if session.commit is not None:
+            commit_lines = _render_session_commit(session.commit)
+            if commit_lines:
+                out.append("")
+                out.extend(commit_lines)
         for turn in session.turns:
             out.append("")
             out.extend(_render_turn(turn))
@@ -321,7 +367,8 @@ def render_prompts_file(pf: PromptsFile) -> str:
 
 
 def prompts_filename(now: datetime | None = None) -> str:
-    """Canonical filename for a `.prompts` file under `prompts/`.
+    """Legacy timestamped filename, kept for migration tools and the
+    rare hand-write path. New captures use `branch_prompts_filename`.
 
     `<ISO8601-seconds-Z>.prompts`
     with `:` replaced by `-` so the filename is portable across filesystems.
@@ -333,4 +380,34 @@ def prompts_filename(now: datetime | None = None) -> str:
     return f"{stamp}.prompts"
 
 
-__all__ = ["render_prompts_file", "prompts_filename"]
+_BRANCH_SLUG_REPLACE = re.compile(r"[^a-z0-9._-]+")
+
+
+def branch_prompts_filename(branch: str) -> str:
+    """Return the canonical `<slug>.prompts` filename for a git branch.
+
+    Spec v0.2 collapses the per-commit fragmentation of v0.1 into one
+    `.prompts` file per branch — `prompts/main.prompts` for trunk,
+    `prompts/feature-billing-rewrite.prompts` for a feature branch,
+    and so on. The original branch name (with slashes / case / non-
+    ASCII intact) is preserved in the file's `[commit].branch` field
+    and on every session's `[sessions.commit].branch`, so this slug
+    only has to be a stable filesystem-safe handle, not a reversible
+    encoding.
+
+    Rules:
+      - Lowercase; `/` and any other non-`[a-z0-9._-]` rune is collapsed
+        to a single `-`.
+      - Leading / trailing `-` and `.` are stripped (`.foo` filenames
+        are confusing on macOS / Windows).
+      - An empty result (e.g. branch is just `///`) falls back to
+        `branch` so we never write `prompts/.prompts`.
+    """
+    raw = (branch or "").strip().lower()
+    cleaned = _BRANCH_SLUG_REPLACE.sub("-", raw).strip("-.")
+    if not cleaned:
+        cleaned = "branch"
+    return f"{cleaned}.prompts"
+
+
+__all__ = ["render_prompts_file", "prompts_filename", "branch_prompts_filename"]

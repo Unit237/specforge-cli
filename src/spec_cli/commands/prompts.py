@@ -43,9 +43,14 @@ from ..prompts import (
     PromptSchemaError,
     PromptsFile,
     Session,
+    SessionCommit,
     read_prompts_file,
 )
-from ..prompts.render import prompts_filename, render_prompts_file
+from ..prompts.render import (
+    branch_prompts_filename,
+    prompts_filename,
+    render_prompts_file,
+)
 from ..prompts.tiers import (
     Tier,
     captured_dir,
@@ -55,6 +60,7 @@ from ..prompts.tiers import (
     iter_all_prompts,
     iter_pending,
     pending_dir,
+    prompts_root,
 )
 from ..sources import (
     ClaudeCodeError,
@@ -116,22 +122,117 @@ def _existing_session_ids(bundle_root: Path) -> set[str]:
     return seen
 
 
+def _branch_prompts_path(bundle_root: Path, branch: str) -> Path:
+    """Resolve the canonical `prompts/<branch-slug>.prompts` path.
+
+    v0.2 keeps every branch's captured sessions in one append-only
+    file at the root of `prompts/`. The `prompts/captured/` and
+    `prompts/curated/` tier directories are still honoured by the
+    parser for back-compat with existing bundles, but new captures
+    flow into the branch file directly.
+    """
+    return prompts_root(bundle_root) / branch_prompts_filename(branch)
+
+
+def _stamp_capture_commit(session: Session, *, git, fallback_branch: str) -> None:
+    """Stamp per-session commit context onto a freshly-discovered Session.
+
+    The agent-side adapters (`read_claude_code_sessions`,
+    `read_cursor_sessions`) don't know about git — they just read the
+    local store. We attach the *current* git context here so each
+    session in the captured file carries its own attribution, even
+    when the file ends up holding many commits over time.
+    """
+    if session.commit is not None:
+        return
+    session.commit = SessionCommit(
+        branch=git.branch or fallback_branch,
+        commit_sha=git.commit_sha,
+        author_name=git.author_name,
+        author_email=git.author_email,
+    )
+
+
+def _merge_into_branch_file(
+    dest: Path,
+    *,
+    branch: str,
+    author_name: str,
+    author_email: str,
+    new_sessions: list[Session],
+) -> int:
+    """Append `new_sessions` to the branch file at `dest`.
+
+    Idempotent on session id: a session already present in the file
+    is dropped. Re-renders the whole file deterministically so two
+    captures with the same input produce byte-identical output.
+
+    Returns the number of *new* sessions actually written.
+    """
+    existing: PromptsFile | None
+    if dest.exists():
+        try:
+            existing = read_prompts_file(dest)
+        except PromptSchemaError:
+            existing = None
+    else:
+        existing = None
+
+    if existing is None:
+        merged = PromptsFile(
+            commit=CommitMeta(
+                branch=branch,
+                author_name=author_name,
+                author_email=author_email,
+            ),
+            sessions=list(new_sessions),
+            edits=[],
+        )
+        added = len(new_sessions)
+    else:
+        seen_ids = {s.id for s in existing.sessions}
+        appended: list[Session] = []
+        for s in new_sessions:
+            if s.id in seen_ids:
+                continue
+            appended.append(s)
+            seen_ids.add(s.id)
+        merged = PromptsFile(
+            commit=existing.commit,
+            sessions=existing.sessions + appended,
+            edits=existing.edits,
+        )
+        added = len(appended)
+
+    if added == 0:
+        return 0
+
+    body = render_prompts_file(merged)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(body, encoding="utf-8")
+    return added
+
+
 def run_auto_capture(bundle_root: Path) -> Path | None:
     """Run capture as a side-effect of another command (e.g. `spec add .`).
 
-    Returns the path of the freshly-written `.prompts` file when at
-    least one new session was discovered, or `None` when there was
-    nothing new (the common case on a quiet bundle). Either way, the
-    function is silent unless something interesting happened — `spec
-    add`'s output is the user's mental anchor; capture noise would
-    drown it out.
+    Returns the path of the branch's `.prompts` file when at least
+    one new session was added, or `None` when there was nothing new
+    (the common case on a quiet bundle). Either way, the function is
+    silent unless something interesting happened — `spec add`'s output
+    is the user's mental anchor; capture noise would drown it out.
+
+    v0.2 writes to `prompts/<branch-slug>.prompts` (one file per
+    branch, append-only). Trunk's file accumulates direct-to-trunk
+    sessions; branch files accumulate work-in-progress, and Cloud's
+    branch-merge endpoint promotes a branch's sessions into trunk's
+    file with `merged_from` set so reviewed sessions show the green-
+    dot signal in the UI.
 
     Failure modes are deliberately swallowed at the call site
     (`spec add` wraps this in a try/except and only prints the error).
     A missing agent store, a network error talking to git, an empty
-    discovered list — none of these should abort `spec add`. The
-    canonical way to surface real capture errors is to run
-    `spec prompts capture` directly.
+    discovered list — none of these should abort `spec add`.
     """
     record_bundle_path(bundle_root)
     paths_for_lookup = historical_bundle_paths(bundle_root)
@@ -181,41 +282,25 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
     for s in discovered:
         if s.operator is None:
             s.operator = author_email
+        _stamp_capture_commit(s, git=git, fallback_branch=branch)
 
-    now = datetime.now(timezone.utc)
-    pf = PromptsFile(
-        commit=CommitMeta(
+    dest = _branch_prompts_path(bundle_root, branch)
+    try:
+        added = _merge_into_branch_file(
+            dest,
             branch=branch,
             author_name=author_name,
             author_email=author_email,
-            committed_at=None,
-            message=None,
-            author_username=None,
-        ),
-        sessions=discovered,
-        edits=[],
-    )
-
-    try:
-        body = render_prompts_file(pf)
+            new_sessions=discovered,
+        )
     except PromptSchemaError:
         return None
 
-    target_dir = captured_dir(bundle_root)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    filename = prompts_filename(now)
-    dest = target_dir / filename
-    if dest.exists():
-        # Two captures in the same second is vanishingly rare, but if
-        # it happens we just bail rather than overwrite an existing
-        # file. The user can re-run when the timestamp ticks.
+    if added == 0:
         return None
-    dest.write_text(body, encoding="utf-8")
 
-    rel_dest = (
-        f"{PROMPTS_DIRNAME}/{PROMPTS_CAPTURED_DIRNAME}/{filename}"
-    )
-    info(f"captured {len(discovered)} new session(s) → {rel_dest}")
+    rel_dest = f"{PROMPTS_DIRNAME}/{dest.name}"
+    info(f"captured {added} new session(s) → {rel_dest}")
     return dest
 
 
@@ -436,39 +521,59 @@ def capture_cmd(
 
     # Tag each session with who drove it. With git identity alone this is
     # a best guess; when credentials are linked to Cloud, the username is
-    # written in `[commit].author_username` separately.
+    # written in `[commit].author_username` separately. Per-session
+    # `[sessions.commit]` snapshots the current git state so the file
+    # can hold sessions from many commits without losing attribution.
     for s in discovered:
         if s.operator is None:
             s.operator = author_email
+        _stamp_capture_commit(s, git=git, fallback_branch=branch)
 
-    now = datetime.now(timezone.utc)
-    pf = PromptsFile(
-        commit=CommitMeta(
+    dest = _branch_prompts_path(root, branch)
+    rel_dest = f"{PROMPTS_DIRNAME}/{dest.name}"
+
+    if dry_run:
+        existing_n = 0
+        if dest.exists():
+            try:
+                existing_n = len(read_prompts_file(dest).sessions)
+            except PromptSchemaError:
+                existing_n = 0
+        console.print(
+            f"[sf.label]prompts capture[/] [sf.muted]· "
+            f"{len(discovered)} new session(s) → {rel_dest}"
+            f" ({existing_n} already in file)[/]"
+        )
+        if warn_non_git:
+            dim(
+                "Not a git worktree — writing `branch=detached` and "
+                "`author=unknown` into [commit]. You'll want to hand-edit "
+                "those before pushing."
+            )
+        dim("\n--dry-run: skipping write.")
+        return
+
+    try:
+        added = _merge_into_branch_file(
+            dest,
             branch=branch,
             author_name=author_name,
             author_email=author_email,
-            committed_at=None,  # populated by the push flow / hook; unknown here
-            message=None,
-            author_username=None,
-        ),
-        sessions=discovered,
-        edits=[],
-    )
-
-    try:
-        body = render_prompts_file(pf)
+            new_sessions=discovered,
+        )
     except PromptSchemaError as e:
         fatal(f"render failed: {e}")
         return
 
-    target_dir = captured_dir(root)
-    filename = prompts_filename(now)
-    dest = target_dir / filename
-    rel_dest = f"{PROMPTS_DIRNAME}/{PROMPTS_CAPTURED_DIRNAME}/{filename}"
+    if added == 0:
+        # Every discovered session was already in the file (idempotent
+        # re-run). Stay quiet — no diff for the user to look at.
+        dim("No new sessions to capture (already present in branch file).")
+        return
 
     console.print(
         f"[sf.label]prompts capture[/] [sf.muted]· "
-        f"{len(discovered)} new session(s) → {rel_dest}[/]"
+        f"{added} new session(s) → {rel_dest}[/]"
     )
     if warn_non_git:
         dim(
@@ -477,24 +582,10 @@ def capture_cmd(
             "those before pushing."
         )
 
-    if dry_run:
-        dim("\n--dry-run: skipping write.")
-        return
-
-    if dest.exists():
-        fatal(
-            f"{dest.relative_to(root)} already exists. Two captures in the "
-            "same second is unusual — wait a moment and re-run."
-        )
-        return
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    dest.write_text(body, encoding="utf-8")
-
     pointer("wrote", str(dest.relative_to(root)))
     dim(
-        f"Captured prompts are advisory context. To promote one for review, "
-        f"run `spec prompts submit {rel_dest}`."
+        "Branch captures are append-only. Push from a non-trunk branch "
+        "and open a review in Spec Cloud to merge into trunk's prompts."
     )
 
 
