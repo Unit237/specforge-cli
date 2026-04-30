@@ -23,7 +23,7 @@ _STATE_LABEL = {
     "modified": "modified",
     "untracked": "untracked",
     "deleted": "deleted",
-    "ignored": "ignored (not a spec file)",
+    "ignored": "ignored (not bundle content)",
     "clean": "clean",
 }
 
@@ -46,7 +46,7 @@ def status_cmd(show_all: bool) -> None:
         f"[sf.muted]· {root}[/]"
     )
 
-    lines = classify_working_tree(root, idx)
+    lines = classify_working_tree(root, idx, manifest=manifest.data)
     if not lines:
         dim("Working tree is empty.")
         return

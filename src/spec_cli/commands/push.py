@@ -49,7 +49,36 @@ def _chunk(seq, n):
     "or a bare slug (uses your handle from saved credentials).",
 )
 @click.option("--dry-run", is_flag=True, help="Show what would be pushed, don't upload.")
-def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None:
+@click.option(
+    "--no-review",
+    is_flag=True,
+    help=(
+        "Skip the auto-open of a branch review. By default, pushing "
+        "from any non-trunk branch opens (or re-opens) a review on "
+        "Cloud — that's the natural \"this work is ready for eyes\" "
+        "moment. Pass this flag to push silently."
+    ),
+)
+@click.option(
+    "--reviewer",
+    "reviewers",
+    multiple=True,
+    metavar="EMAIL",
+    help=(
+        "Email addresses to request review from. Repeatable. Cloud "
+        "surfaces matching reviewers an \"Awaiting your review\" "
+        "queue and (if configured) sends Slack notifications. Only "
+        "meaningful when a review is opened (i.e. on a non-trunk "
+        "branch and without `--no-review`)."
+    ),
+)
+def push_cmd(
+    remote_url: str | None,
+    project: str | None,
+    dry_run: bool,
+    no_review: bool,
+    reviewers: tuple[str, ...],
+) -> None:
     """Upload the staged snapshot to Spec Cloud.
 
     With no argument, pushes to the host in ~/.spec/credentials using
@@ -57,6 +86,14 @@ def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None
     an explicit remote, git-style:
 
       spec push https://spec.lightreach.io/acme/billing.git
+
+    When the push originates from a non-trunk git branch, `spec push`
+    automatically opens (or re-opens) a Cloud review on that branch —
+    same shape as `gh pr create` after a `git push`. The first push
+    creates the review; subsequent pushes are idempotent (server
+    upserts on `(project, branch, status='open')`). Use `--no-review`
+    to opt out and `--reviewer email@example.com` to request specific
+    reviewers up-front.
     """
     try:
         root = find_bundle_root()
@@ -173,7 +210,31 @@ def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None
     try:
         project_info = client.resolve_project(handle, slug)
     except ApiError as e:
-        fatal(f"Could not resolve project '{handle}/{slug}': {e}")
+        # The server returns the same "Bundle not found" body for "doesn't
+        # exist" and "you can't read it" — that's deliberate, so a non-member
+        # can't probe for project existence. Surfacing the two cases the
+        # user can fix themselves keeps the error actionable without
+        # leaking which one applies. (Pending-invite collaborators are by
+        # far the common case in practice — the message intentionally lists
+        # that one first.)
+        detail = ""
+        if isinstance(e.body, dict):
+            d = e.body.get("detail")
+            if isinstance(d, str):
+                detail = d.lower()
+        if e.status == 400 and "not found" in detail:
+            ui_host = creds.api_base.rstrip("/")
+            fatal(
+                f"Could not resolve project '{handle}/{slug}': {e}\n"
+                f"  · If you were invited as a collaborator, accept the invite "
+                f"at {ui_host} first (sign-in → bundle → invite link), then "
+                f"re-run `spec push`.\n"
+                f"  · If this is your own bundle, register it at "
+                f"{ui_host}/{handle} (\"+ New bundle\") with slug `{slug}`, "
+                f"then re-run `spec push`."
+            )
+        else:
+            fatal(f"Could not resolve project '{handle}/{slug}': {e}")
         return
     project_id = project_info["id"]
 
@@ -219,5 +280,63 @@ def push_cmd(remote_url: str | None, project: str | None, dry_run: bool) -> None
 
     if total_accepted:
         ok(f"Pushed {total_accepted} file(s) to [bold]{handle}/{slug}[/]")
+
+    # Auto-open a branch review on non-trunk pushes. The server upserts
+    # by (project, branch, status='open'), so calling this on every
+    # push is safe — the review is created on the first push and a
+    # no-op on every subsequent one (modulo title/reviewer updates).
+    #
+    # Trunk detection: project_info carries `default_branch` (defaults
+    # to "main"; teams override via `cloud.default_branch` in
+    # `spec.yaml`). Pushes on the default branch never open a review.
+    default_branch = project_info.get("default_branch") or "main"
+    on_trunk = (git.branch is None) or (git.branch == default_branch)
+    if not no_review and total_accepted and not on_trunk:
+        title = (git.commit_sha and _title_from_commit(root)) or None
+        try:
+            review = client.open_branch_review(
+                project_id,
+                git.branch,
+                title=title,
+                requested_reviewers=list(reviewers) if reviewers else None,
+            )
+        except ApiError as e:
+            warn(
+                f"push succeeded but could not open review on `{git.branch}`: {e}. "
+                f"Open it manually at {creds.api_base.rstrip('/')}."
+            )
+            return
+        review_id = review.get("id")
+        review_url = (
+            f"{creds.api_base.rstrip('/')}/{handle}/{slug}"
+            f"?branch={git.branch}"
+        )
+        if review.get("status") == "open":
+            if review_id is not None:
+                ok(
+                    f"review #{review_id} open on [bold]{git.branch}[/] · "
+                    f"{review_url}"
+                )
+            else:
+                ok(f"review open on [bold]{git.branch}[/] · {review_url}")
+        else:
+            dim(f"branch `{git.branch}` review state: {review.get('status')}")
+
     if total_rejected:
         raise SystemExit(1)
+
+
+def _title_from_commit(root) -> str | None:
+    """Best-effort extraction of the latest commit message subject.
+
+    Used as the default review title when `spec push --review`
+    (or the auto-open flow) needs to fill the field. We deliberately
+    use the *subject line only* — anything more is noise on the review
+    list. Returns `None` outside a git worktree or on any error.
+    """
+    from ..git import _run_git  # type: ignore[attr-defined]
+
+    out = _run_git(["log", "-1", "--pretty=%s"], cwd=root)
+    if not out:
+        return None
+    return out.strip()[:200] or None

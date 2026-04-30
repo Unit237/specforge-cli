@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,65 @@ from ..ui import dim, fatal, info, ok, pointer
 
 
 AGENTS_FILENAME: str = "AGENTS.md"
+
+
+# Strip the trailing ``.git`` and pull the last path segment out of any
+# remote URL git itself accepts on the CLI:
+#   - ssh-shorthand: ``git@github.com:owner/repo.git`` (note the ``:``)
+#   - https:         ``https://github.com/owner/repo.git``
+#   - ssh-with-scheme: ``ssh://git@github.com/owner/repo.git``
+#   - file://, gitlab, bitbucket, custom hosts — anything whose path ends
+#     in ``…/<repo>`` or ``…/<repo>.git`` works; we don't validate hosts.
+# A best-effort match: pathological inputs (empty, ``.``, ``.git``) fall
+# through to ``None`` so the caller can default to ``Path.cwd().name``.
+_REPO_NAME_RE = re.compile(
+    r"""
+    (?:[:/])               # `:` for ssh-shorthand, `/` otherwise
+    (?P<repo>[^/:\s]+?)    # the last path segment (lazy, no separators)
+    (?:\.git)?             # optional .git suffix
+    /*\s*$                 # trailing slashes / whitespace, end of string
+    """,
+    re.VERBOSE,
+)
+
+
+def _repo_name_from_remote(url: str | None) -> str | None:
+    """Infer a sensible bundle name from a git remote URL.
+
+    Returns ``None`` for empty / unparseable / pathological inputs so
+    callers can fall back to ``Path.cwd().name`` cleanly. The extracted
+    name is *not* slugified — bundle names are free-form text in
+    ``spec.yaml`` and the cloud only cares about the slug, which is
+    derived server-side.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    match = _REPO_NAME_RE.search(url.strip())
+    if not match:
+        return None
+    name = match.group("repo").strip()
+    if not name or name in (".", "..", ".git"):
+        return None
+    return name
+
+
+# `.gitignore` block — Spec-managed, idempotent. Re-running `spec init`
+# replaces the block in place via these sentinels; deleting both
+# sentinels opts out (the block won't be reinstalled). We deliberately
+# duplicate the well-known ``.spec/`` line even though ``.spec/.gitignore``
+# already self-ignores: a single top-level ``.gitignore`` is what
+# engineers reviewing the repo expect to see, and the redundancy is
+# harmless — git takes the union.
+GITIGNORE_BLOCK_BEGIN: str = "# >>> spec >>>"
+GITIGNORE_BLOCK_END: str = "# <<< spec <<<"
+GITIGNORE_BLOCK_BODY: str = f"""\
+{GITIGNORE_BLOCK_BEGIN}
+# Auto-managed by `spec init`. Re-run to update; or delete the whole
+# block (sentinels included) to opt out.
+.spec/         # Spec CLI's local index/staging directory.
+out/           # Default `spec compile` output target — regenerated.
+{GITIGNORE_BLOCK_END}
+"""
 
 # The `.git/hooks/post-commit` we install. Contract:
 #   - Runs `spec prompts capture` after every commit.
@@ -325,6 +385,39 @@ def _chmod_executable(path: Path) -> None:
         pass
 
 
+def _install_gitignore_block(repo_root: Path) -> tuple[str, Path]:
+    """Install or update the Spec-managed ``.gitignore`` block.
+
+    Returns ``(status, path)`` where ``status`` is one of:
+        "installed"  — fresh ``.gitignore`` written from scratch
+        "appended"   — block added to an existing user-authored file
+        "updated"    — replaced an existing Spec block in place
+        "unchanged"  — block already matches; no write performed
+    """
+    path = repo_root / ".gitignore"
+
+    if not path.exists():
+        path.write_text(GITIGNORE_BLOCK_BODY, encoding="utf-8")
+        return "installed", path
+
+    existing = path.read_text(encoding="utf-8")
+    if GITIGNORE_BLOCK_BEGIN in existing and GITIGNORE_BLOCK_END in existing:
+        start = existing.index(GITIGNORE_BLOCK_BEGIN)
+        end = existing.index(GITIGNORE_BLOCK_END) + len(GITIGNORE_BLOCK_END)
+        updated = existing[:start] + GITIGNORE_BLOCK_BODY.rstrip() + existing[end:]
+        if updated == existing:
+            return "unchanged", path
+        path.write_text(updated, encoding="utf-8")
+        return "updated", path
+
+    separator = "" if existing.endswith("\n") else "\n"
+    path.write_text(
+        existing + separator + "\n" + GITIGNORE_BLOCK_BODY,
+        encoding="utf-8",
+    )
+    return "appended", path
+
+
 def _stage_scaffold_for_push(
     root: Path,
     *,
@@ -333,7 +426,13 @@ def _stage_scaffold_for_push(
     agents_written: bool,
 ) -> list[str]:
     """Hash-and-record scaffolded spec files so `spec push` does not
-    require a redundant `spec add spec.yaml` after a fresh `spec init`."""
+    require a redundant `spec add spec.yaml` after a fresh `spec init`.
+
+    Also stamps the bundle's current absolute path into
+    ``index.bundle_paths`` so a future ``spec prompts capture`` can
+    still find sessions captured under this path even if the folder
+    has been renamed in the meantime — see ``stage.record_bundle_path``.
+    """
     from ..stage import load_index, save_index, sha256
 
     rels: list[str] = [MANIFEST_FILENAME, "docs/product.md"]
@@ -348,27 +447,77 @@ def _stage_scaffold_for_push(
         if p.is_file():
             idx.staged[rel] = sha256(p.read_bytes())
             staged.append(rel)
-    if staged:
+    resolved = str(root.resolve())
+    if resolved not in idx.bundle_paths:
+        idx.bundle_paths.append(resolved)
+    if staged or resolved in idx.bundle_paths:
         save_index(idx)
     return staged
 
 
 @click.command("init")
-@click.option("--name", "-n", default=None, help="Bundle name (defaults to directory name).")
+@click.option(
+    "--name",
+    "-n",
+    default=None,
+    help="Bundle name. Defaults to the git origin's repo name "
+    "(matching GitHub mental model), falling back to the directory "
+    "name when there is no `origin` remote.",
+)
 @click.option("--force", is_flag=True, help="Overwrite an existing spec.yaml.")
 @click.option(
     "--skip-git-hook",
     is_flag=True,
     help="Don't install the post-commit hook even if this is a git repo.",
 )
-def init_cmd(name: str | None, force: bool, skip_git_hook: bool) -> None:
+@click.option(
+    "--skip-gitignore",
+    is_flag=True,
+    help="Don't add the Spec-managed `.gitignore` block at the repo root.",
+)
+def init_cmd(
+    name: str | None,
+    force: bool,
+    skip_git_hook: bool,
+    skip_gitignore: bool,
+) -> None:
     """Scaffold a starter bundle in the current directory."""
     root = Path.cwd().resolve()
-    bundle_name = name or root.name
 
     manifest_path = root / MANIFEST_FILENAME
     if manifest_path.exists() and not force:
         fatal(f"{MANIFEST_FILENAME} already exists. Re-run with --force to overwrite.")
+
+    # Local imports keep the cold-start path light when init isn't the
+    # invoked command (Click still imports the module on every run).
+    from ..git import read_git_context, read_origin_url, repo_toplevel
+
+    git_ctx = read_git_context(root)
+
+    # Bundle-name precedence:
+    #   --name flag > git origin remote (if it parses) > current directory
+    # The git path matches GitHub's mental model: a repo cloned as
+    # `acme/billing-service` becomes a bundle named `billing-service`.
+    # We surface where the name came from in the output so users aren't
+    # surprised by a name they didn't type.
+    name_origin: str
+    name_origin_detail: str | None = None
+    if name is not None:
+        bundle_name = name
+        name_origin = "flag"
+    else:
+        inferred: str | None = None
+        origin_url: str | None = None
+        if git_ctx.is_repo:
+            origin_url = read_origin_url(root)
+            inferred = _repo_name_from_remote(origin_url)
+        if inferred:
+            bundle_name = inferred
+            name_origin = "git"
+            name_origin_detail = origin_url
+        else:
+            bundle_name = root.name
+            name_origin = "dir"
 
     _write_starter_manifest(manifest_path, bundle_name)
 
@@ -382,10 +531,7 @@ def init_cmd(name: str | None, force: bool, skip_git_hook: bool) -> None:
     # exists; `spec prompts capture` will extend from there.
     prompts_dir = root / PROMPTS_DIRNAME
     prompts_dir.mkdir(exist_ok=True)
-    from ..git import read_git_context  # local import: avoids a hard dep
-                                        # on the git helper at module load.
 
-    git_ctx = read_git_context(root)
     author_name = git_ctx.author_name or "You"
     author_email = git_ctx.author_email or "you@example.com"
 
@@ -418,6 +564,25 @@ def init_cmd(name: str | None, force: bool, skip_git_hook: bool) -> None:
             info("")
             dim(f"Could not install post-commit hook ({e}). Skipping.")
 
+    # Top-level `.gitignore` block. Lives at the worktree root (not the
+    # bundle root, when they differ) so engineers see Spec's ignored
+    # paths in the same file as their own. ``.spec/`` already
+    # self-ignores via an inner ``.gitignore``; the duplicate entry here
+    # is for review hygiene — git takes the union.
+    gitignore_status: str | None = None
+    gitignore_path: Path | None = None
+    if not skip_gitignore:
+        worktree_root = repo_toplevel(root) if git_ctx.is_repo else None
+        if worktree_root is not None:
+            try:
+                gitignore_status, gitignore_path = _install_gitignore_block(
+                    worktree_root,
+                )
+            except OSError as e:
+                # A read-only worktree shouldn't fail the whole init.
+                info("")
+                dim(f"Could not update .gitignore ({e}). Skipping.")
+
     auto_staged = _stage_scaffold_for_push(
         root,
         wrote_prompts=wrote_prompts,
@@ -426,6 +591,10 @@ def init_cmd(name: str | None, force: bool, skip_git_hook: bool) -> None:
     )
 
     ok(f"Initialized bundle [bold]{bundle_name}[/] in {root}")
+    if name_origin == "git" and name_origin_detail:
+        dim(f"  name inferred from git remote: {name_origin_detail}")
+    elif name_origin == "dir":
+        dim(f"  name inferred from directory: {root.name}")
     pointer("manifest    ", str(manifest_path.relative_to(root)))
     pointer("entry       ", "docs/product.md")
     pointer("prompts     ", f"{PROMPTS_DIRNAME}/")
@@ -453,6 +622,17 @@ def init_cmd(name: str | None, force: bool, skip_git_hook: bool) -> None:
             "`git init && spec init --force` to install it, or wire "
             "`spec prompts capture` into your workflow manually."
         )
+
+    if gitignore_status and gitignore_path is not None:
+        try:
+            rel_gi = gitignore_path.relative_to(root)
+        except ValueError:
+            rel_gi = gitignore_path
+        pointer("gitignore   ", f"{rel_gi} ({gitignore_status})")
+        if gitignore_status in ("installed", "appended", "updated"):
+            dim("  ignores `.spec/` and `out/` (compile artifacts)")
+    elif skip_gitignore:
+        dim("Skipped .gitignore update (--skip-gitignore).")
 
     # Friendly pointer: is Claude Code actually installed on this box? We
     # don't fail the command if it isn't; `--via api` is still a valid

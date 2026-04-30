@@ -20,7 +20,13 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
-from .constants import MANIFEST_FILENAME, PROMPTS_DIRNAME, is_spec_file
+from .constants import (
+    MANIFEST_FILENAME,
+    PROMPTS_DIRNAME,
+    is_bundle_path,
+    is_spec_file,
+)
+from .frontmatter import read_frontmatter
 
 
 INDEX_DIRNAME = ".spec"
@@ -41,6 +47,12 @@ class Index:
     root: Path
     staged: dict[str, str] = field(default_factory=dict)
     pushed: dict[str, str] = field(default_factory=dict)
+    # Every absolute filesystem path this bundle has lived at, oldest
+    # first. Append-only and travels with the folder (it's stored
+    # inside the bundle's own ``.spec/index.json``). The Claude Code
+    # and Cursor adapters consult this list so a folder rename doesn't
+    # orphan a session — see ``record_bundle_path``.
+    bundle_paths: list[str] = field(default_factory=list)
 
     @property
     def dir(self) -> Path:
@@ -58,6 +70,9 @@ def load_index(root: Path) -> Index:
             raw = json.load(f)
         idx.staged = dict(raw.get("staged") or {})
         idx.pushed = dict(raw.get("pushed") or {})
+        raw_paths = raw.get("bundle_paths") or []
+        if isinstance(raw_paths, list):
+            idx.bundle_paths = [p for p in raw_paths if isinstance(p, str) and p]
     return idx
 
 
@@ -67,7 +82,69 @@ def save_index(idx: Index) -> None:
     if not gi.exists():
         gi.write_text("*\n", encoding="utf-8")
     with idx.path.open("w", encoding="utf-8") as f:
-        json.dump({"staged": idx.staged, "pushed": idx.pushed}, f, indent=2, sort_keys=True)
+        json.dump(
+            {
+                "staged": idx.staged,
+                "pushed": idx.pushed,
+                "bundle_paths": idx.bundle_paths,
+            },
+            f,
+            indent=2,
+            sort_keys=True,
+        )
+
+
+def record_bundle_path(root: Path) -> Index:
+    """Remember the absolute path the bundle currently lives at.
+
+    The first time this is called for a bundle (typically by
+    ``spec init`` and again by every ``spec prompts capture`` run), the
+    resolved path is appended to ``index.bundle_paths``. Subsequent
+    calls are no-ops if the path is already recorded.
+
+    On a rename / move the file moves with the folder, so the next
+    ``capture`` from the new location appends the new path next to the
+    old one. Both Claude Code and Cursor session lookups iterate the
+    full list, which is what makes prompt history survive a folder
+    move (Fix #2 of the git-parity work).
+
+    Returns the updated ``Index`` so callers that already needed it for
+    other reasons don't pay for two reads.
+    """
+    idx = load_index(root)
+    resolved = str(root.resolve())
+    if resolved not in idx.bundle_paths:
+        idx.bundle_paths.append(resolved)
+        save_index(idx)
+    return idx
+
+
+def historical_bundle_paths(root: Path) -> list[Path]:
+    """Every filesystem path this bundle has lived at, current first.
+
+    Order: the resolved current root, then any earlier paths recorded
+    in ``index.bundle_paths`` that are *not* the current path. We
+    deliberately keep paths in the list even if they no longer exist
+    on disk — the bundle has moved, but Claude Code's session store
+    very likely still has data under the old encoded name and we need
+    to look there.
+    """
+    current = root.resolve()
+    out: list[Path] = [current]
+    seen: set[Path] = {current}
+    try:
+        idx = load_index(root)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return out
+    for raw in idx.bundle_paths:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        out.append(candidate)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -75,16 +152,38 @@ def save_index(idx: Index) -> None:
 # ---------------------------------------------------------------------------
 
 
-def walk_spec_files(root: Path) -> Iterable[Path]:
+def walk_spec_files(
+    root: Path, *, manifest: dict | None = None
+) -> Iterable[Path]:
     """
-    Yield every file inside `root` that `is_spec_file` would accept, in
+    Yield every file inside `root` that belongs in the bundle, in
     deterministic order. Skips dotfile dirs (`.git`, `.spec`, …).
+
+    Bundle-membership is resolved through `is_bundle_path`:
+      - `spec.yaml` — always in.
+      - `.prompts`  — always in.
+      - `.md` / `.markdown` — in iff the resolver says so (frontmatter
+        override → spec.yaml include/exclude → agent allowlist → human
+        denylist). See `constants.is_bundle_md` for the full ladder.
+
+    Caller can pass a parsed manifest dict to honour the bundle's
+    `spec.include` / `spec.exclude` configuration. With `manifest=None`
+    the resolver falls back to the default include glob, which matches
+    most bundles, so the explicit `spec add path/to/file.md` flow still
+    works without loading the manifest twice.
+
+    Note: ``.cursor/rules/**/*.mdc`` is intentionally **not** yielded by
+    this walk even though the resolver knows about it — the dotfile-dir
+    skip is the right default for ``spec add .`` (it would otherwise
+    sweep up ``.git/``, ``.venv/``, ``.spec/``). Users who want to
+    include cursor rules can do so explicitly via
+    ``spec add .cursor/rules/foo.mdc`` or by listing the path in
+    ``spec.include``.
     """
     root = root.resolve()
     for p in sorted(root.rglob("*")):
         if not p.is_file():
             continue
-        # Skip anything inside a dot-prefixed directory.
         try:
             parts = p.relative_to(root).parts
         except ValueError:
@@ -92,8 +191,16 @@ def walk_spec_files(root: Path) -> Iterable[Path]:
         if any(part.startswith(".") for part in parts[:-1]):
             continue
         rel = rel_posix(root, p)
-        if is_spec_file(rel):
-            yield p
+        if not is_spec_file(rel):
+            continue
+        # `.prompts` and `spec.yaml` are always in; only `.md`-class
+        # files need the full resolver (which can read frontmatter).
+        suffix = PurePosixPath(rel).suffix.lower()
+        if suffix in (".md", ".markdown"):
+            fm = read_frontmatter(p)
+            if not is_bundle_path(rel, manifest=manifest, frontmatter=fm):
+                continue
+        yield p
 
 
 def walk_all_files(root: Path) -> Iterable[Path]:
@@ -121,7 +228,9 @@ class StatusLine:
     hash: str | None = None
 
 
-def classify_working_tree(root: Path, idx: Index) -> list[StatusLine]:
+def classify_working_tree(
+    root: Path, idx: Index, *, manifest: dict | None = None
+) -> list[StatusLine]:
     from .constants import classify
 
     lines: list[StatusLine] = []
@@ -134,6 +243,19 @@ def classify_working_tree(root: Path, idx: Index) -> list[StatusLine]:
         if not is_spec_file(rel):
             lines.append(StatusLine(rel=rel, kind="other", state="ignored"))
             continue
+
+        # An `.md` that fails the bundle-membership resolver is treated
+        # the same as any other non-spec file: visible in the tree,
+        # rendered as `ignored`, never swept up by `spec add .`. This
+        # matches the design call in PLAN.md §2.1 — non-bundle `.md`
+        # files share a row state with `.png` rather than getting their
+        # own "auxiliary" surface.
+        suffix = PurePosixPath(rel).suffix.lower()
+        if suffix in (".md", ".markdown"):
+            fm = read_frontmatter(p)
+            if not is_bundle_path(rel, manifest=manifest, frontmatter=fm):
+                lines.append(StatusLine(rel=rel, kind="other", state="ignored"))
+                continue
 
         content = p.read_bytes()
         h = sha256(content)

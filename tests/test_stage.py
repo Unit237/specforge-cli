@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,9 @@ from spec_cli.stage import (
     InvalidBundleError,
     assert_push_invariants,
     classify_working_tree,
+    historical_bundle_paths,
     load_index,
+    record_bundle_path,
     sha256,
 )
 
@@ -80,3 +83,63 @@ def test_push_invariants_rejects_md_under_prompts():
 def test_sha256_stable():
     assert sha256(b"") == sha256(b"")
     assert sha256(b"hi") != sha256(b"ho")
+
+
+# ---------------------------------------------------------------------------
+# Bundle-path aliases (Fix #2): index remembers every location the bundle
+# has lived at so a folder rename doesn't orphan its prompt history.
+# ---------------------------------------------------------------------------
+
+
+def test_record_bundle_path_is_idempotent(tmp_path):
+    root = _make_bundle(tmp_path)
+    record_bundle_path(root)
+    record_bundle_path(root)
+    record_bundle_path(root)
+    idx = load_index(root)
+    # Same path recorded three times still appears exactly once.
+    assert idx.bundle_paths == [str(root.resolve())]
+
+
+def test_historical_bundle_paths_includes_current_first(tmp_path):
+    root = _make_bundle(tmp_path)
+    record_bundle_path(root)
+    paths = historical_bundle_paths(root)
+    assert paths[0] == root.resolve()
+
+
+def test_historical_bundle_paths_survives_rename(tmp_path):
+    """The whole point of Fix #2: after a folder move, the *old* path
+    is still in the historical list because `.spec/index.json` travels
+    with the folder."""
+    old_root = tmp_path / "billing"
+    old_root.mkdir()
+    _make_bundle(old_root)
+    record_bundle_path(old_root)
+
+    new_root = tmp_path / "payments"
+    shutil.move(str(old_root), str(new_root))
+
+    # Simulate the next `prompts capture` from the new location.
+    record_bundle_path(new_root)
+
+    paths = historical_bundle_paths(new_root)
+    resolved = [p.resolve() for p in paths]
+    # Current path comes first; the old path is still in the list,
+    # which is what lets the source adapters look in two places.
+    assert resolved[0] == new_root.resolve()
+    assert old_root.resolve() in resolved
+
+
+def test_load_index_tolerates_missing_bundle_paths_field(tmp_path):
+    """Old indexes (pre-Fix #2) didn't carry `bundle_paths`. Loading
+    one must not crash; the field defaults to empty."""
+    root = _make_bundle(tmp_path)
+    spec_dir = root / ".spec"
+    spec_dir.mkdir(exist_ok=True)
+    # Hand-write an old-shape index.json — only `staged` and `pushed`.
+    (spec_dir / "index.json").write_text(
+        '{"staged": {}, "pushed": {}}', encoding="utf-8"
+    )
+    idx = load_index(root)
+    assert idx.bundle_paths == []

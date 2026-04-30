@@ -29,6 +29,7 @@ from .schema import (
     Turn,
     validate_prompts_file,
 )
+from .text_sanitize import sanitize_for_toml_text
 
 # ---------------------------------------------------------------------------
 # Header — fixed text so two renders match byte-for-byte.
@@ -140,6 +141,7 @@ def _render_text_field(key: str, value: str, *, indent: str = "") -> str:
         content contains `'''`
       - basic string (`"…"`) for short single-line text
     """
+    value = sanitize_for_toml_text(value)
     if "\n" in value or len(value) > 80:
         canonical = value if value.endswith("\n") else value + "\n"
         if "'''" not in canonical:

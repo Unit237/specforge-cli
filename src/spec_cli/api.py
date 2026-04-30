@@ -88,12 +88,27 @@ class CloudClient:
     def _as_project_out(data: Any) -> dict[str, Any]:
         if isinstance(data, dict) and "id" in data:
             return data
+        extra = ""
+        if isinstance(data, str):
+            lead = data.lstrip()[:300].lower()
+            if lead.startswith("<!doctype") or lead.startswith("<html") or lead.startswith(
+                "<head"
+            ):
+                extra = (
+                    " The response body looks like HTML (e.g. the single-page app) — "
+                    "so /api/... may not be reaching the FastAPI backend. "
+                    "For self-serve: confirm `api_base` in ~/.spec/credentials "
+                    "matches the host that serves /api (try the same origin you use in the "
+                    "browser, or set SPEC_API for `spec login`)."
+                )
+            elif data:
+                extra = f" First bytes: {data[:120]!r}…" if len(data) > 120 else f" Body: {data!r}"
         raise ApiError(
             "Cloud returned an unexpected project response (expected a JSON object "
             "with an `id` field). "
-            "This often means the request hit a non-API page (HTML or plain text) — "
-            "check `api_base` in `~/.spec/credentials` and the Spec API URL. "
-            f"Got: {type(data).__name__}."
+            "Usually the CLI got HTML or plain text instead of API JSON (wrong "
+            "SPEC_API / `api_base`, or a proxy returned a web page). "
+            f"Got: {type(data).__name__}.{extra}"
         )
 
     def resolve_project(self, handle: str, slug: str) -> dict[str, Any]:
@@ -193,3 +208,40 @@ class CloudClient:
         """
         data = self._request("GET", f"/api/projects/{project_id}/log")
         return data or []
+
+    # -- branch reviews ------------------------------------------------
+
+    def open_branch_review(
+        self,
+        project_id: int,
+        branch: str,
+        *,
+        title: str | None = None,
+        summary: str | None = None,
+        requested_reviewers: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Open (or idempotently re-open) a review for a non-trunk branch.
+
+        Wraps ``POST /branches/by-name/review``. The Cloud endpoint is
+        idempotent: a second call on an already-open review updates
+        the title / summary / reviewers when they're set, returning
+        the existing row. That's the property `spec push` relies on
+        — we call this on every push to a non-trunk branch and the
+        review either appears (first push) or stays put (subsequent
+        pushes).
+        """
+        body: dict[str, Any] = {}
+        if title is not None:
+            body["title"] = title
+        if summary is not None:
+            body["summary"] = summary
+        if requested_reviewers is not None:
+            body["requested_reviewers"] = requested_reviewers
+
+        from urllib.parse import quote as _q
+
+        path = (
+            f"/api/projects/{project_id}/branches/by-name/review"
+            f"?branch={_q(branch, safe='')}"
+        )
+        return self._request("POST", path, json=body)

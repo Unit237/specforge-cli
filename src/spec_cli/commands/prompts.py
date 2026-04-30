@@ -58,11 +58,14 @@ from ..prompts.tiers import (
 )
 from ..sources import (
     ClaudeCodeError,
+    CursorError,
     claude_code_project_dir,
+    cursor_workspace_storage_root,
     read_claude_code_sessions,
+    read_cursor_sessions,
 )
 from ..sources.claude_code import claude_code_store_root
-from ..stage import rel_posix
+from ..stage import historical_bundle_paths, record_bundle_path, rel_posix
 from ..ui import console, dim, fatal, info, ok, pointer, reject, warn
 
 
@@ -113,6 +116,109 @@ def _existing_session_ids(bundle_root: Path) -> set[str]:
     return seen
 
 
+def run_auto_capture(bundle_root: Path) -> Path | None:
+    """Run capture as a side-effect of another command (e.g. `spec add .`).
+
+    Returns the path of the freshly-written `.prompts` file when at
+    least one new session was discovered, or `None` when there was
+    nothing new (the common case on a quiet bundle). Either way, the
+    function is silent unless something interesting happened — `spec
+    add`'s output is the user's mental anchor; capture noise would
+    drown it out.
+
+    Failure modes are deliberately swallowed at the call site
+    (`spec add` wraps this in a try/except and only prints the error).
+    A missing agent store, a network error talking to git, an empty
+    discovered list — none of these should abort `spec add`. The
+    canonical way to surface real capture errors is to run
+    `spec prompts capture` directly.
+    """
+    record_bundle_path(bundle_root)
+    paths_for_lookup = historical_bundle_paths(bundle_root)
+
+    claude_store = claude_code_store_root()
+    cursor_store = cursor_workspace_storage_root()
+    claude_available = claude_store.exists()
+    cursor_available = cursor_store.exists()
+    if not claude_available and not cursor_available:
+        return None
+
+    git = read_git_context(bundle_root)
+    author_name = git.author_name or "unknown"
+    author_email = git.author_email or "unknown@unknown"
+    branch = git.branch or "detached"
+
+    already = _existing_session_ids(bundle_root)
+    discovered: list[Session] = []
+
+    if claude_available:
+        try:
+            for session in read_claude_code_sessions(
+                paths_for_lookup, since=None, verbose=True
+            ):
+                if session.id in already:
+                    continue
+                already.add(session.id)
+                discovered.append(session)
+        except ClaudeCodeError:
+            return None
+
+    if cursor_available:
+        try:
+            for session in read_cursor_sessions(
+                paths_for_lookup, since=None, verbose=True
+            ):
+                if session.id in already:
+                    continue
+                already.add(session.id)
+                discovered.append(session)
+        except CursorError:
+            return None
+
+    if not discovered:
+        return None
+
+    for s in discovered:
+        if s.operator is None:
+            s.operator = author_email
+
+    now = datetime.now(timezone.utc)
+    pf = PromptsFile(
+        commit=CommitMeta(
+            branch=branch,
+            author_name=author_name,
+            author_email=author_email,
+            committed_at=None,
+            message=None,
+            author_username=None,
+        ),
+        sessions=discovered,
+        edits=[],
+    )
+
+    try:
+        body = render_prompts_file(pf)
+    except PromptSchemaError:
+        return None
+
+    target_dir = captured_dir(bundle_root)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    filename = prompts_filename(now)
+    dest = target_dir / filename
+    if dest.exists():
+        # Two captures in the same second is vanishingly rare, but if
+        # it happens we just bail rather than overwrite an existing
+        # file. The user can re-run when the timestamp ticks.
+        return None
+    dest.write_text(body, encoding="utf-8")
+
+    rel_dest = (
+        f"{PROMPTS_DIRNAME}/{PROMPTS_CAPTURED_DIRNAME}/{filename}"
+    )
+    info(f"captured {len(discovered)} new session(s) → {rel_dest}")
+    return dest
+
+
 # ---------------------------------------------------------------------------
 # `spec prompts` command group
 # ---------------------------------------------------------------------------
@@ -135,9 +241,9 @@ def prompts_group() -> None:
 @prompts_group.command("capture")
 @click.option(
     "--source",
-    type=click.Choice(["claude_code", "all"], case_sensitive=False),
+    type=click.Choice(["claude_code", "cursor", "all"], case_sensitive=False),
     default="all",
-    help="Restrict capture to one source. Currently only claude_code is implemented.",
+    help="Restrict capture to one source (claude_code, cursor) or read both with `all`.",
 )
 @click.option(
     "--since",
@@ -145,54 +251,112 @@ def prompts_group() -> None:
     help="Only sessions started after this ISO 8601 timestamp (e.g. 2026-04-01T00:00:00Z).",
 )
 @click.option(
+    "--max-sessions",
+    type=int,
+    default=None,
+    metavar="N",
+    help="When many sessions are new (typical on first run), only include the N most recent by start time.",
+)
+@click.option(
+    "--summary-only",
+    is_flag=True,
+    help=(
+        "Capture only a one-sentence `summary` of each assistant turn. "
+        "Default is to also include a bounded `text` preview of the AI "
+        "response so reviewers can see what the agent actually said."
+    ),
+)
+@click.option(
     "--verbose",
     "verbose_capture",
     is_flag=True,
     help=(
-        "Capture full assistant text in `text` fields (off by default). "
-        "Resulting sessions are marked `verbose = true` per the schema."
+        "Deprecated alias for the new default behaviour (capture preview "
+        "text). Kept for back-compat with existing scripts."
     ),
 )
 @click.option("--dry-run", is_flag=True, help="Print counts, don't write any file.")
 def capture_cmd(
     source: str,
     since: str | None,
+    max_sessions: int | None,
+    summary_only: bool,
     verbose_capture: bool,
     dry_run: bool,
 ) -> None:
     """Snapshot every new conversational session into one `.prompts` file.
 
-    Writes `prompts/<UTC-timestamp>.prompts` at the bundle root, containing
+    Only reads the Claude Code store folder for *this* bundle (see
+    ``~/.claude/projects/<encoded-path>``); other repos are not included.
+    The first time you run capture, every session in that folder that has
+    not yet been written to a ``.prompts`` file is included, which can be
+    many. Use ``--max-sessions`` or ``--since`` to cap the batch.
+
+    Writes `prompts/captured/<UTC-timestamp>.prompts`, containing
     a `[commit]` block (from your git context) plus one `[[sessions]]` block
     per discovered session. Run after each commit, or wire into a post-commit
     hook; sessions already captured in any prior `.prompts` file are skipped.
+
+    By default each assistant turn carries a bounded `text` preview
+    (first ~3 KB of the response), in addition to the one-sentence
+    `summary`. Pass `--summary-only` to fall back to summary-only
+    capture; the `--verbose` flag is kept as a no-op alias for the
+    new default. Sessions with text are marked `verbose = true` per
+    the prompts schema.
     """
+    # `--verbose` used to be required to capture assistant text; it's
+    # now the implicit default. Either flag or its absence yields the
+    # same result; only `--summary-only` opts out.
+    _ = verbose_capture
+    capture_text = not summary_only
     try:
         root = find_bundle_root()
     except BundleNotFoundError as e:
         fatal(str(e))
         return
 
+    if max_sessions is not None and max_sessions < 1:
+        fatal("--max-sessions must be at least 1")
+        return
+
     since_dt = _parse_since(since)
 
-    # Prove the Claude Code store exists — users who've never run Claude
-    # Code get a friendly pointer, not a cryptic empty result.
-    store_root = claude_code_store_root()
-    if not store_root.exists():
-        dim(f"Claude Code store not found at {store_root}.")
+    # Remember where the bundle currently lives. On the first move /
+    # rename after this point, the next capture will see *both* paths
+    # in the historical list and find sessions written under either
+    # location (Fix #2).
+    record_bundle_path(root)
+    paths_for_lookup = historical_bundle_paths(root)
+
+    requested = source.lower()
+    if requested not in ("claude_code", "cursor", "all"):
+        fatal(f"Unknown source `{source}`.")
+        return
+    want_claude = requested in ("claude_code", "all")
+    want_cursor = requested in ("cursor", "all")
+
+    # Probe each requested store. Missing stores aren't errors when
+    # `--source all` is the default — a user with only Cursor (or only
+    # Claude Code) installed should still be able to capture.
+    claude_store = claude_code_store_root()
+    cursor_store = cursor_workspace_storage_root()
+    claude_available = want_claude and claude_store.exists()
+    cursor_available = want_cursor and cursor_store.exists()
+
+    if requested == "claude_code" and not claude_available:
+        dim(f"Claude Code store not found at {claude_store}.")
         info("Install Claude Code and start a session, then re-run `spec prompts capture`.")
         info("  https://claude.ai/code")
         return
-
-    project_dir = claude_code_project_dir(root)
-    if not project_dir.exists():
-        dim("No Claude Code sessions recorded for this bundle yet.")
-        dim(f"(looked for {project_dir.name} under {store_root})")
+    if requested == "cursor" and not cursor_available:
+        dim(f"Cursor workspace store not found at {cursor_store}.")
+        info("Open this bundle in Cursor and chat at least once, then re-run `spec prompts capture`.")
         return
-
-    # Guard against the one-source switch. Cursor capture is not in v0.1.
-    if source.lower() not in ("claude_code", "all"):
-        fatal(f"Unknown source `{source}`.")
+    if not claude_available and not cursor_available:
+        dim("No coding-agent stores found on this machine.")
+        dim(f"  Claude Code: {claude_store}")
+        dim(f"  Cursor:      {cursor_store}")
+        info("Install Claude Code or Cursor, start a session, then re-run.")
         return
 
     # Capture context: git state + user identity. `read_git_context` fails
@@ -210,20 +374,65 @@ def capture_cmd(
     already_captured = _existing_session_ids(root)
 
     discovered = []
-    try:
-        for session in read_claude_code_sessions(
-            root, since=since_dt, verbose=verbose_capture
-        ):
-            if session.id in already_captured:
-                continue
-            discovered.append(session)
-    except ClaudeCodeError as e:
-        fatal(str(e))
-        return
+    if claude_available:
+        try:
+            for session in read_claude_code_sessions(
+                paths_for_lookup, since=since_dt, verbose=capture_text
+            ):
+                if session.id in already_captured:
+                    continue
+                already_captured.add(session.id)
+                discovered.append(session)
+        except ClaudeCodeError as e:
+            fatal(str(e))
+            return
+
+    if cursor_available:
+        try:
+            for session in read_cursor_sessions(
+                paths_for_lookup, since=since_dt, verbose=capture_text
+            ):
+                if session.id in already_captured:
+                    continue
+                already_captured.add(session.id)
+                discovered.append(session)
+        except CursorError as e:
+            fatal(str(e))
+            return
 
     if not discovered:
         dim("No new sessions to capture.")
         return
+
+    if max_sessions is not None and len(discovered) > max_sessions:
+        tmin = datetime.min.replace(tzinfo=timezone.utc)
+
+        def _start_key(s: Session) -> datetime:
+            return s.started_at if s.started_at is not None else tmin
+
+        by_new = sorted(discovered, key=_start_key, reverse=True)[: max_sessions]
+        by_new.sort(
+            key=lambda s: (
+                s.started_at is None,
+                s.started_at or datetime.max.replace(tzinfo=timezone.utc),
+                s.id,
+            ),
+        )
+        discovered = by_new
+        warn(
+            f"Only the {max_sessions} most recent session(s) are included (--max-sessions)."
+        )
+    elif len(discovered) > 20 and since is None:
+        warn(
+            f"Capturing {len(discovered)} new session(s) (everything not yet in a .prompts file for this folder). "
+            "To limit: use --max-sessions=N or --since=2026-04-01T00:00:00Z."
+        )
+        if claude_available:
+            dim(
+                f"Claude session store for this bundle: {claude_code_project_dir(root)}"
+            )
+        if cursor_available:
+            dim(f"Cursor workspace store: {cursor_store}")
 
     # Tag each session with who drove it. With git identity alone this is
     # a best guess; when credentials are linked to Cloud, the username is

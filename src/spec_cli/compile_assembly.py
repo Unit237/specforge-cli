@@ -13,12 +13,12 @@ compile prompt can be hashed, reviewed, and reproduced.
 
 from __future__ import annotations
 
-import fnmatch
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from .config import Manifest
-from .constants import PROMPTS_DIRNAME
+from .constants import PROMPTS_DIRNAME, is_bundle_md
+from .frontmatter import read_frontmatter
 from .prompts.tiers import Tier, iter_compilable
 from .stage import rel_posix
 
@@ -55,98 +55,58 @@ class AssembledBundle:
 # ---------------------------------------------------------------------------
 
 
-def _is_md(rel: str) -> bool:
-    low = rel.lower()
-    return low.endswith(".md") or low.endswith(".markdown")
-
-
-def _match_any(rel: str, patterns: list[str]) -> bool:
-    p = PurePosixPath(rel)
-    for pat in patterns:
-        if fnmatch.fnmatchcase(rel, pat):
-            return True
-        # `docs/**/*.md` should also match `docs/product.md`. fnmatch on
-        # its own doesn't implement `**`, so we emulate by also comparing
-        # against each parent-collapsed pattern.
-        if "**" in pat:
-            # Convert `a/**/b` into a regex-ish pattern by treating `**`
-            # as "any path". Simple approach: split and check.
-            if _double_star_match(rel, pat):
-                return True
-        _ = p  # keep PurePosixPath import used if we extend later
-    return False
-
-
-def _double_star_match(rel: str, pattern: str) -> bool:
-    """Very small subset of glob `**`: treats `**` as "zero or more path
-    components". Sufficient for the patterns `spec.yaml` users write
-    (`docs/**/*.md`, `prompts/**/*.md`)."""
-    rel_parts = rel.split("/")
-    pat_parts = pattern.split("/")
-
-    def match(ri: int, pi: int) -> bool:
-        if pi == len(pat_parts):
-            return ri == len(rel_parts)
-        if pat_parts[pi] == "**":
-            # Match zero or more parts.
-            for k in range(ri, len(rel_parts) + 1):
-                if match(k, pi + 1):
-                    return True
-            return False
-        if ri == len(rel_parts):
-            return False
-        if fnmatch.fnmatchcase(rel_parts[ri], pat_parts[pi]):
-            return match(ri + 1, pi + 1)
-        return False
-
-    return match(0, 0)
-
-
 def _collect_spec_files(root: Path, manifest: Manifest) -> list[str]:
     """Return bundle-relative paths of every `.md` to compile, in order.
 
-    Order is:
-      1. `spec.entry` first (if it exists).
-      2. Then everything matching `spec.include`, in filesystem order.
-      3. Anything matching `spec.exclude` is removed.
-      4. Duplicates removed; first occurrence wins.
+    Walks the bundle and consults `is_bundle_md` for every `.md` /
+    `.markdown` file. The resolver handles `spec.include` /
+    `spec.exclude`, the agent allowlist (AGENTS.md / CLAUDE.md / etc.),
+    the human denylist (README.md / CHANGELOG.md / …), and per-file
+    frontmatter overrides — see ``constants.is_bundle_md``.
+
+    Order is deterministic:
+      1. `spec.entry` first (if it exists and the resolver agrees).
+      2. Then every other in-bundle `.md`, in filesystem order.
 
     Mirrors `spec_compiler.bundle.load_bundle` semantics for v0.1.
+    Files under `prompts/` are skipped here — they're either `.prompts`
+    files (handled separately) or rejected at upload time.
     """
     spec = (manifest.data.get("spec") or {}) if manifest.data else {}
     entry = spec.get("entry") or "docs/product.md"
-    include = spec.get("include") or ["docs/**/*.md"]
-    exclude = spec.get("exclude") or []
 
     ordered: list[str] = []
     seen: set[str] = set()
 
-    if (root / entry).is_file():
-        ordered.append(entry)
-        seen.add(entry)
+    entry_path = root / entry
+    if entry_path.is_file():
+        fm = read_frontmatter(entry_path)
+        if is_bundle_md(entry, manifest=manifest.data, frontmatter=fm):
+            ordered.append(entry)
+            seen.add(entry)
 
-    for path in sorted((root).rglob("*")):
+    for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         rel = rel_posix(root, path)
-        # Skip dotfile dirs and the sessions subdir — sessions get their
-        # own assembly path, they're not spec docs.
+        # Skip dotfile dirs — `.git`, `.spec`, `.venv`. The resolver
+        # already understands `.cursor/rules/**/*.mdc` (which has its
+        # own extension), but we skip dot-dirs at the walk level so the
+        # CLI never tries to read every file under `node_modules` or
+        # `.git/objects`.
         parts = PurePosixPath(rel).parts
         if any(p.startswith(".") for p in parts[:-1]):
             continue
-        if not _is_md(rel):
+        low = rel.lower()
+        if not (low.endswith(".md") or low.endswith(".markdown")):
             continue
-        if not _match_any(rel, include):
-            continue
-        if _match_any(rel, exclude):
-            continue
-        # Don't double-count the entry.
         if rel in seen:
             continue
-        # Anything under `prompts/` is not a spec doc — prompts live in
-        # `.prompts` files, not `.md`, and markdown under prompts/ is
-        # rejected elsewhere in the stack anyway.
+        # Anything under `prompts/` is reserved for `.prompts` files.
         if rel.startswith(PROMPTS_DIRNAME + "/") or rel == PROMPTS_DIRNAME:
+            continue
+        fm = read_frontmatter(path)
+        if not is_bundle_md(rel, manifest=manifest.data, frontmatter=fm):
             continue
         ordered.append(rel)
         seen.add(rel)

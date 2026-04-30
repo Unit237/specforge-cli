@@ -85,4 +85,37 @@ def read_git_context(root: Path) -> GitContext:
     return ctx
 
 
-__all__ = ["GitContext", "read_git_context"]
+def read_origin_url(root: Path) -> str | None:
+    """Return the URL configured for the ``origin`` remote, or ``None``.
+
+    ``None`` covers every "we can't tell" case in one bucket — no git,
+    no worktree, no ``origin``, transient subprocess failure — so the
+    caller doesn't have to untangle them. Spec only consults this for
+    name inference, where any failure should silently fall back to the
+    directory name.
+    """
+    out = _run_git(["config", "--get", "remote.origin.url"], cwd=root)
+    return out or None
+
+
+def repo_toplevel(root: Path) -> Path | None:
+    """Resolve the worktree root via ``git rev-parse --show-toplevel``.
+
+    Returns ``None`` when ``root`` isn't inside a git worktree. We
+    prefer this over walking the filesystem for a ``.git`` because it
+    handles git-worktree, submodule, and ``GIT_DIR`` setups uniformly —
+    git already knows where the worktree starts and we don't.
+    """
+    out = _run_git(["rev-parse", "--show-toplevel"], cwd=root)
+    if not out:
+        return None
+    p = Path(out)
+    return p if p.is_dir() else None
+
+
+__all__ = [
+    "GitContext",
+    "read_git_context",
+    "read_origin_url",
+    "repo_toplevel",
+]
