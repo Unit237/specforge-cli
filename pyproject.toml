@@ -37,8 +37,8 @@ dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.urls]
 Homepage = "https://spec.lightreach.io"
-Source = "https://github.com/spec/spec-cli"
-Issues = "https://github.com/spec/spec-cli/issues"
+Source = "https://github.com/Unit237/specforge-cli"
+Issues = "https://github.com/Unit237/specforge-cli/issues"
 
 [project.scripts]
 spec = "spec_cli.cli:main"

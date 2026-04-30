@@ -80,6 +80,27 @@ def test_push_invariants_rejects_md_under_prompts():
     assert "prompts/" in str(exc.value)
 
 
+def test_push_invariants_rejects_nested_spec_yaml():
+    # Defense in depth: even if a stale index entry from before the
+    # `is_spec_file` tightening (or a hand-edited `.spec/index.json`)
+    # gets a nested `spec.yaml` into the staged set, the push-time
+    # invariant catches it with a clear, actionable error rather than
+    # letting the server return its less-specific rejection.
+    with pytest.raises(InvalidBundleError) as exc:
+        assert_push_invariants(
+            Path("/tmp"),
+            {
+                "spec.yaml": "x",
+                "docs/product.md": "y",
+                "backend/app/spec.yaml": "z",
+            },
+        )
+    msg = str(exc.value)
+    assert "backend/app/spec.yaml" in msg
+    assert "bundle root" in msg
+    assert "spec unstage" in msg
+
+
 def test_sha256_stable():
     assert sha256(b"") == sha256(b"")
     assert sha256(b"hi") != sha256(b"ho")

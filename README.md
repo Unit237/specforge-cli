@@ -258,7 +258,7 @@ args only, no file contents or command output.
   needs to reason about why the model did what it did.
 - **Compilation is pluggable.** The default `--via claude-code` path has
   zero LLM dependencies; `--via api` shells out to
-  [`spec-compiler`](https://github.com/spec/spec-compiler),
+  [`spec-compiler`](https://github.com/Unit237/specforge-compiler),
   which owns the SDK-weight parts.
 
 ## License

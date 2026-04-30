@@ -294,7 +294,10 @@ class InvalidBundleError(ValueError):
 def assert_push_invariants(root: Path, staged: dict[str, str]) -> None:
     """
     At push time the snapshot we're about to send must contain:
-      - exactly one `spec.yaml` at the root
+      - exactly one `spec.yaml` at the root (no nested ones — the
+        manifest is bundle-scoped, so a `backend/app/spec.yaml` is
+        application config that happens to share a filename, not a
+        sub-manifest)
       - at least one `.md` / `.markdown` file
       - no `.md` files inside `prompts/` — that directory is reserved
         for `.prompts` (plural) files and mixing types there is almost
@@ -307,6 +310,32 @@ def assert_push_invariants(root: Path, staged: dict[str, str]) -> None:
         raise InvalidBundleError(
             f"The bundle has no {MANIFEST_FILENAME} staged. "
             "Run `spec add spec.yaml`."
+        )
+
+    # Defense in depth: with current `is_spec_file` semantics a nested
+    # `spec.yaml` is filtered out at `spec add`-time and never reaches
+    # the index. But indexes outlive code (someone upgrades the CLI
+    # mid-flight, hand-edits `.spec/index.json`, or carries forward a
+    # stale entry from before this rule was tightened), so we re-check
+    # here rather than letting the server return its less-actionable
+    # "Only .md / .markdown / .prompts files (and spec.yaml) are
+    # allowed in a bundle" rejection.
+    nested_manifests = [
+        rel
+        for rel in staged
+        if rel != MANIFEST_FILENAME
+        and PurePosixPath(rel).name == MANIFEST_FILENAME
+    ]
+    if nested_manifests:
+        path = nested_manifests[0]
+        raise InvalidBundleError(
+            f"{path} — `{MANIFEST_FILENAME}` is only allowed at the bundle "
+            "root. Each bundle has exactly one manifest, so a nested "
+            f"`{MANIFEST_FILENAME}` is application config that happens "
+            "to share a filename, not a sub-manifest.\n\n"
+            f"Run `spec unstage {path}` to drop it (and consider renaming "
+            "the file, e.g. to `config.yaml`, so it doesn't get re-added "
+            "by a future `spec add .`)."
         )
 
     md_prefix = f"{PROMPTS_DIRNAME}/"

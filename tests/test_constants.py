@@ -40,10 +40,31 @@ def test_is_spec_file_rejects_code():
     assert not is_spec_file("spec.yml")  # only .yaml is valid
 
 
+def test_is_spec_file_rejects_nested_spec_yaml():
+    # Each bundle has exactly one manifest, at the root. A nested
+    # `spec.yaml` is application config that happens to share a
+    # filename — not a sub-manifest — so the staging walker must
+    # silently skip it. Catching it here keeps the misleading server
+    # rejection ("Only .md / .markdown / .prompts files (and
+    # spec.yaml) are allowed in a bundle") off the push path.
+    assert not is_spec_file("backend/app/spec.yaml")
+    assert not is_spec_file("services/api/spec.yaml")
+    assert not is_spec_file("nested/spec.yaml")
+
+
 def test_classify_settings_prompts_md():
     assert classify("spec.yaml") == "settings"
     assert classify("prompts/2026-04-21T11-47-35Z.prompts") == "prompts"
     assert classify("docs/product.md") == "md"
+
+
+def test_classify_nested_spec_yaml_is_not_settings():
+    # Sister to `is_spec_file_rejects_nested_spec_yaml`. Pure
+    # classification of a nested `spec.yaml` should NOT return
+    # "settings" — there's exactly one manifest per bundle. The path
+    # falls into the `md`/extension-bucket fallback and is rejected
+    # by the server-side classifier with a specific error message.
+    assert classify("backend/app/spec.yaml") != "settings"
 
 
 def test_classify_prompts_ext_anywhere():

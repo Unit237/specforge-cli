@@ -151,9 +151,16 @@ def is_spec_file(path: str | PurePosixPath) -> bool:
 
     Accepts either a forward-slash path or a PurePosixPath. Case-insensitive
     on the extension, case-sensitive on the manifest filename (YAML convention).
+
+    `spec.yaml` is recognised **only at the bundle root** — there is exactly
+    one manifest per bundle. A nested `backend/app/spec.yaml` is treated as
+    a regular `.yaml` file (i.e. *not* a spec file) so the staging walker
+    silently skips it instead of staging something the server will later
+    reject. Catching it here keeps the misleading "wrong extension" error
+    off the push path.
     """
     p = PurePosixPath(str(path))
-    if p.name == MANIFEST_FILENAME:
+    if str(p) == MANIFEST_FILENAME:
         return True
     return p.suffix.lower() in SPEC_EXTENSIONS
 
@@ -166,7 +173,12 @@ def classify(path: str | PurePosixPath) -> str:
     CLI's idea of a file's kind matches Cloud's without a network call.
 
     Classification rules, in order:
-      1. `spec.yaml` at any depth is `settings`.
+      1. `spec.yaml` **at the bundle root** is `settings`. Nested
+         `spec.yaml` files are not bundle content (they're application
+         config that happens to share a filename) and are filtered out
+         upstream by `is_spec_file`; if one slips through this far it
+         falls into the `md`/`prompts`/other branches based on its
+         extension and is ultimately rejected by the server.
       2. Any `.prompts` file is `prompts`, regardless of location.
       3. Everything else spec-eligible is `md`.
 
@@ -175,7 +187,7 @@ def classify(path: str | PurePosixPath) -> str:
     are rejected elsewhere in the stack.
     """
     p = PurePosixPath(str(path))
-    if p.name == MANIFEST_FILENAME:
+    if str(p) == MANIFEST_FILENAME:
         return "settings"
     if p.suffix.lower() == ".prompts":
         return "prompts"
@@ -368,9 +380,12 @@ def is_bundle_path(
     `.prompts` files (always in if they pass the extension gate). Used
     by `spec status` and the Cloud file tree to render the file's row
     state in one call.
+
+    `spec.yaml` is bundle content **only at the root** — see
+    `is_spec_file` for why nested manifests are intentionally excluded.
     """
     p = PurePosixPath(str(rel))
-    if p.name == MANIFEST_FILENAME:
+    if str(p) == MANIFEST_FILENAME:
         return True
     suffix = p.suffix.lower()
     if suffix == ".prompts":
