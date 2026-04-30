@@ -25,8 +25,23 @@ the workspace they were created in), but the message bodies are large
 and Cursor stores them once globally so opening a workspace doesn't
 have to load every bubble. We mirror that split.
 
-Scope mirrors git: a Cursor composer counts for ``bundle_root`` if
-``workspace.json`` resolves to that bundle root or a descendant of it.
+Scope mirrors git: a Cursor composer counts for ``bundle_root`` when
+``workspace.json``'s folder *intersects* the bundle on disk. That
+covers three real shapes:
+
+  - the workspace folder is the bundle root itself,
+  - the workspace folder is a subdirectory of the bundle root (you
+    opened Cursor on ``<bundle>/backend``), and
+  - the workspace folder is an *ancestor* of the bundle root (you
+    opened Cursor on the umbrella project that contains the bundle —
+    e.g. a monorepo where ``spec init`` lives in
+    ``./services/billing``). Without this case Cursor users running
+    a single editor over multiple bundles would never see prompts
+    captured for the bundle they live inside, even though they were
+    typed while looking at bundle files. This is the spirit of git's
+    "any subdir of the working tree counts" rule, applied to Cursor's
+    workspace abstraction.
+
 The mapping is *not* lossy (unlike Claude Code's path encoding), so
 the cwd defense-in-depth check that Claude Code needs is unnecessary
 here — we just check the workspace folder URL up front.
@@ -122,17 +137,26 @@ class _WorkspaceMatch:
 def _workspace_dir_candidates(
     bundle_paths: Iterable[Path],
 ) -> list[_WorkspaceMatch]:
-    """Every Cursor workspaceStorage entry whose folder is inside the bundle.
+    """Every Cursor workspaceStorage entry whose folder intersects the bundle.
 
     Iterates ``<storage>/*/workspace.json``, parses the recorded
-    ``folder`` URL, and keeps the dir if the folder equals or is a
-    descendant of any of the given bundle paths.
+    ``folder`` URL, and keeps the dir if the workspace folder
+    *overlaps* any of the given bundle paths — i.e. the workspace
+    folder is the bundle root, a descendant of it (Cursor opened on a
+    subdir), or an ancestor of it (Cursor opened on a parent that
+    contains the bundle as a child). See the module docstring for the
+    full rationale; the short version is "if a developer typing in
+    Cursor could plausibly have been editing this bundle, capture
+    those prompts". For ancestor matches we point ``workspace_folder``
+    at the bundle root rather than the (broader) Cursor workspace
+    folder — the captured ``.prompts`` files belong *to the bundle*,
+    not to the umbrella repo Cursor happens to be open on, and
+    downstream consumers (``Session.cwd``) treat the field as "the
+    folder this conversation is attributed to".
 
     The bundle-paths list is the rename-resilient set: the current
     bundle root plus any historical paths persisted in
-    ``.spec/index.json`` (Fix #2). Each match remembers which folder
-    URL got it in so downstream code can build the ``Session.cwd``
-    that the rest of the pipeline expects.
+    ``.spec/index.json`` (Fix #2).
     """
     storage_root = cursor_workspace_storage_root()
     if not storage_root.is_dir():
@@ -165,15 +189,31 @@ def _workspace_dir_candidates(
             resolved_folder = folder_path.resolve()
         except OSError:
             continue
-        if not any(
-            resolved_folder == r or r in resolved_folder.parents
-            for r in resolved_roots
-        ):
+
+        # Match shape against every recorded bundle path. We care
+        # about the FIRST match because that's the canonical bundle
+        # location to attribute the session to:
+        #   - exact / descendant: workspace_folder is the natural cwd
+        #   - ancestor: anchor the session at the bundle root, not at
+        #     the wider Cursor workspace folder. The folder we record
+        #     becomes ``Session.cwd`` and is what shows up in `.prompts`
+        #     metadata, so it has to read as "this conversation is
+        #     about <bundle>", not "this conversation lived in some
+        #     parent monorepo".
+        anchor: Path | None = None
+        for r in resolved_roots:
+            if resolved_folder == r or r in resolved_folder.parents:
+                anchor = resolved_folder
+                break
+            if resolved_folder in r.parents:
+                anchor = r
+                break
+        if anchor is None:
             continue
         matches.append(
             _WorkspaceMatch(
                 storage_dir=child,
-                workspace_folder=resolved_folder,
+                workspace_folder=anchor,
             )
         )
     return matches

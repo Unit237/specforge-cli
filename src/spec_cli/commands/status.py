@@ -29,9 +29,32 @@ _STATE_LABEL = {
 
 
 @click.command("status")
-@click.option("--all", "show_all", is_flag=True, help="Include clean files in the output.")
-def status_cmd(show_all: bool) -> None:
-    """Show what would be pushed from this bundle."""
+@click.option(
+    "--all",
+    "show_all",
+    is_flag=True,
+    help="Include clean and ignored files in the output.",
+)
+@click.option(
+    "--ignored",
+    "show_ignored",
+    is_flag=True,
+    help="Also list files that aren't bundle content (auxiliary docs, "
+    "non-spec files). Hidden by default — they're noise during the "
+    "common review-and-push loop.",
+)
+def status_cmd(show_all: bool, show_ignored: bool) -> None:
+    """Show what would be pushed from this bundle.
+
+    By default the listing is the *actionable* set: staged, modified,
+    untracked, and deleted bundle paths. ``ignored`` (anything the
+    resolver classifies as not bundle content — ``README.md``,
+    ``package.json``, ``node_modules/…``) and ``clean`` rows stay
+    hidden because they don't change what ``spec push`` is about to
+    do. ``--ignored`` brings them back when you need to debug "why
+    isn't this file in my bundle?"; ``--all`` is the everything-on
+    surface (clean + ignored + the rest).
+    """
     try:
         root = find_bundle_root()
     except BundleNotFoundError as e:
@@ -59,6 +82,8 @@ def status_cmd(show_all: bool) -> None:
     for state in _STATE_ORDER:
         if state == "clean" and not show_all:
             continue
+        if state == "ignored" and not (show_all or show_ignored):
+            continue
         bucket = grouped[state]
         if not bucket:
             continue
@@ -73,3 +98,13 @@ def status_cmd(show_all: bool) -> None:
 
     if not printed:
         dim("Nothing to do.")
+        return
+
+    hidden_ignored = len(grouped["ignored"]) if not (show_all or show_ignored) else 0
+    if hidden_ignored:
+        console.print()
+        dim(
+            f"{hidden_ignored} ignored file"
+            f"{'' if hidden_ignored == 1 else 's'} hidden — "
+            "rerun with --ignored to inspect."
+        )

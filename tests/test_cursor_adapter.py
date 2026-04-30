@@ -266,6 +266,39 @@ def test_read_cursor_sessions_includes_subworkspaces(tmp_path, monkeypatch):
     assert sorted(s.id for s in sessions) == sorted([root_composer, sub_composer])
 
 
+def test_read_cursor_sessions_includes_ancestor_workspaces(tmp_path, monkeypatch):
+    """Cursor opened on the parent monorepo must still attach the
+    composer to a bundle living in a child directory.
+
+    The common shape: developer keeps Cursor open on
+    ``~/Code/megarepo`` and runs ``spec init`` inside
+    ``~/Code/megarepo/services/billing``. Without ancestor matching,
+    every Cursor prompt typed about the billing bundle would be lost
+    — the workspace folder would never equal or descend from the
+    bundle root.
+    """
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path))
+
+    parent = tmp_path / "monorepo"
+    bundle = parent / "services" / "billing"
+    bundle.mkdir(parents=True)
+
+    composer = "cccccccc-cccc-4ccc-aaaa-cccccccccccc"
+    _make_workspace(tmp_path, "ws-parent", parent, [composer])
+    _add_composer(
+        tmp_path,
+        composer,
+        bubbles=[{"id": "u1", "type": 1, "text": "tweak the billing bundle"}],
+    )
+
+    sessions = list(read_cursor_sessions(bundle))
+    assert [s.id for s in sessions] == [composer]
+    # Anchored at the bundle root, not the wider monorepo folder —
+    # `Session.cwd` represents which bundle the conversation belongs
+    # to, and that's the bundle we discovered, not the umbrella.
+    assert sessions[0].cwd == str(bundle.resolve())
+
+
 def test_read_cursor_sessions_drops_empty_user_bubbles(tmp_path, monkeypatch):
     """Empty user bubbles (just attachments, no text) would fail the
     schema's `user turn requires text` rule — drop them up front."""
