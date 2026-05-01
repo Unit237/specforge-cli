@@ -94,6 +94,7 @@ def test_read_sessions_extracts_user_and_assistant_turns(tmp_path, monkeypatch):
     assert s.turns[0].text == "Refactor billing.py please."
 
     assert s.turns[1].role == "assistant"
+    assert s.turns[1].model == "claude-sonnet-4-5"
     # Non-verbose mode: no text, just a bounded summary.
     assert s.turns[1].text is None
     assert s.turns[1].summary and "tax" in s.turns[1].summary.lower()

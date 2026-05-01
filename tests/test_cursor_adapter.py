@@ -196,6 +196,7 @@ def test_read_cursor_sessions_extracts_user_and_assistant_turns(tmp_path, monkey
     assert s.turns[0].role == "user"
     assert s.turns[0].text == "Refactor billing.py please."
     assert s.turns[1].role == "assistant"
+    assert s.turns[1].model == "claude-sonnet-4-5"
     assert s.turns[1].text is None  # non-verbose
     assert s.turns[1].summary is not None
     assert "scanning" in s.turns[1].summary.lower()

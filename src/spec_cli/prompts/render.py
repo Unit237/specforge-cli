@@ -305,6 +305,8 @@ def _render_turn(turn: Turn) -> list[str]:
     lines.append(f"  role = {_basic_quote(turn.role)}")
     if turn.at is not None:
         lines.append(f"  at   = {_iso_z(turn.at)}")
+    if turn.model is not None:
+        lines.append(f"  model = {_basic_quote(turn.model)}")
     if turn.summary is not None:
         lines.append(f"  summary = {_basic_quote(turn.summary)}")
     if turn.text is not None:

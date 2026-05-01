@@ -17,6 +17,7 @@ from spec_cli.prompts import (
     validate_prompts_file,
     validate_session,
 )
+from spec_cli.prompts.schema import MAX_TURN_MODEL_CHARS
 from spec_cli.prompts.render import (
     _basic_quote,
     _inline_table,
@@ -180,6 +181,32 @@ def test_validate_rejects_user_without_text():
         validate_session(s)
 
 
+def test_validate_rejects_model_on_user_turn():
+    s = Session(
+        id="x",
+        source="manual",
+        turns=[Turn(role="user", text="hi", model="gpt-4o")],
+    )
+    with pytest.raises(PromptSchemaError) as exc:
+        validate_session(s)
+    assert "model" in str(exc.value).lower()
+
+
+def test_validate_rejects_assistant_model_too_long():
+    long_id = "m" * (MAX_TURN_MODEL_CHARS + 1)
+    s = Session(
+        id="x",
+        source="manual",
+        turns=[
+            Turn(role="user", text="hi"),
+            Turn(role="assistant", summary="done", model=long_id),
+        ],
+    )
+    with pytest.raises(PromptSchemaError) as exc:
+        validate_session(s)
+    assert "model" in str(exc.value).lower()
+
+
 def test_validate_rejects_assistant_text_when_not_verbose():
     s = Session(
         id="x",
@@ -259,6 +286,7 @@ def test_render_and_parse_roundtrip():
             Turn(
                 role="assistant",
                 at=ts_ass,
+                model="claude-sonnet-4-5",
                 summary="Mapping tax call sites before extraction.",
                 tool_calls=[
                     ToolCall(
@@ -282,6 +310,7 @@ def test_render_and_parse_roundtrip():
     )
 
     rendered = render_prompts_file(pf)
+    assert 'model = "claude-sonnet-4-5"' in rendered
     parsed = parse_prompts_text(rendered)
 
     assert parsed.commit.branch == "main"
@@ -303,6 +332,7 @@ def test_render_and_parse_roundtrip():
     # deliberately adds to multi-line content).
     assert "Refactor billing.py" in ps.turns[0].text
     assert ps.turns[1].summary == "Mapping tax call sites before extraction."
+    assert ps.turns[1].model == "claude-sonnet-4-5"
     assert ps.turns[1].tool_calls[0].name == "Grep"
     assert ps.turns[1].tool_calls[0].args == {
         "pattern": "calculate_tax",
@@ -421,6 +451,27 @@ text = "hi"
 """
     with pytest.raises(PromptSchemaError):
         parse_prompts_text(bad)
+
+
+def test_parse_rejects_model_on_user_turn():
+    bad = """
+[commit]
+branch = "main"
+author_name = "x"
+author_email = "x@example.com"
+
+[[sessions]]
+id = "x"
+source = "manual"
+
+[[sessions.turns]]
+role = "user"
+model = "gpt-4o"
+text = "hi"
+"""
+    with pytest.raises(PromptSchemaError) as exc:
+        parse_prompts_text(bad)
+    assert "model" in str(exc.value).lower()
 
 
 # ---------------------------------------------------------------------------

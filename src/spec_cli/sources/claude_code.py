@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from ..prompts.schema import Session, ToolCall, Turn, validate_session
+from ..prompts.schema import MAX_TURN_MODEL_CHARS, Session, ToolCall, Turn, validate_session
 from ..prompts.text_sanitize import sanitize_for_toml_text
 from ..prompts.tools import ALLOWED_TOOL_NAMES, summarize_tool_call
 
@@ -326,11 +326,16 @@ def _build_session_from_file(
             preview = (
                 _preview(summary_text) if (verbose and summary_text) else None
             )
+            raw_model = msg.get("model")
+            turn_model: str | None = None
+            if isinstance(raw_model, str) and raw_model.strip():
+                turn_model = raw_model.strip()[:MAX_TURN_MODEL_CHARS]
             turn = Turn(
                 role="assistant",
                 summary=summary or None,
                 text=preview,
                 at=entry.timestamp,
+                model=turn_model,
                 tool_calls=calls,
             )
             # Skip purely empty assistant turns (no text, no calls). They

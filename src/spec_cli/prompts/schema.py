@@ -54,6 +54,8 @@ MAX_USER_TEXT_CHARS: int = MAX_TURN_TEXT_CHARS  # same cap; kept for API compati
 MAX_SUMMARY_CHARS: int = 2000
 MAX_TITLE_CHARS: int = 200
 MAX_LESSON_CHARS: int = 500
+# Per-assistant-turn LLM id (capture adapters). User turns must not set this.
+MAX_TURN_MODEL_CHARS: int = 128
 
 _COMMIT_ALLOWED_KEYS: frozenset[str] = frozenset(
     {
@@ -113,7 +115,7 @@ _EDIT_ALLOWED_KEYS: frozenset[str] = frozenset(
     {"at", "by", "sessions", "turns", "reason"}
 )
 _TURN_ALLOWED_KEYS: frozenset[str] = frozenset(
-    {"role", "at", "text", "summary", "tool_calls"}
+    {"role", "at", "model", "text", "summary", "tool_calls"}
 )
 _TOOL_CALL_ALLOWED_KEYS: frozenset[str] = frozenset({"name", "args", "status"})
 
@@ -148,6 +150,9 @@ class Turn:
     text: str | None = None
     summary: str | None = None
     at: datetime | None = None
+    # Assistant turns only — which LLM produced this reply (session.model
+    # remains first-seen / legacy summary for the thread).
+    model: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
 
 
@@ -631,6 +636,30 @@ def _parse_turn(raw: Any, *, session_index: int, turn_index: int, verbose: bool)
             f"unknown role `{role}`. Valid: {sorted(VALID_ROLES)}", path=f"{path}.role"
         )
 
+    model_raw = raw.get("model")
+    turn_model: str | None
+    if role == "user":
+        if model_raw is not None:
+            _optional_str(model_raw, path=f"{path}.model")
+            raise PromptSchemaError(
+                "user turns must not carry `model`", path=f"{path}.model"
+            )
+        turn_model = None
+    else:
+        turn_model = _optional_str(model_raw, path=f"{path}.model")
+        if turn_model is not None:
+            turn_model = turn_model.strip()
+            if not turn_model:
+                raise PromptSchemaError(
+                    "`model` must be non-empty when present",
+                    path=f"{path}.model",
+                )
+            if len(turn_model) > MAX_TURN_MODEL_CHARS:
+                raise PromptSchemaError(
+                    f"model exceeds {MAX_TURN_MODEL_CHARS} chars — trim or shorten.",
+                    path=f"{path}.model",
+                )
+
     text = raw.get("text")
     summary = raw.get("summary")
     at = (
@@ -677,7 +706,14 @@ def _parse_turn(raw: Any, *, session_index: int, turn_index: int, verbose: bool)
 
     tool_calls = _parse_tool_calls(raw.get("tool_calls"), turn_path=path)
 
-    return Turn(role=role, text=text, summary=summary, at=at, tool_calls=tool_calls)
+    return Turn(
+        role=role,
+        text=text,
+        summary=summary,
+        at=at,
+        model=turn_model,
+        tool_calls=tool_calls,
+    )
 
 
 def _parse_tool_calls(raw: Any, *, turn_path: str) -> list[ToolCall]:
@@ -761,6 +797,11 @@ def validate_session(session: Session, *, path: str = "session") -> None:
                     "user turns carry `text`, not `summary`",
                     path=f"{tpath}.summary",
                 )
+            if t.model is not None:
+                raise PromptSchemaError(
+                    "user turns must not carry `model`",
+                    path=f"{tpath}.model",
+                )
         else:
             if t.text is not None and not session.verbose:
                 raise PromptSchemaError(
@@ -775,6 +816,17 @@ def validate_session(session: Session, *, path: str = "session") -> None:
                 raise PromptSchemaError(
                     f"text exceeds {MAX_TURN_TEXT_CHARS} chars", path=f"{tpath}.text"
                 )
+            if t.model is not None:
+                if not t.model.strip():
+                    raise PromptSchemaError(
+                        "`model` must be non-empty when present",
+                        path=f"{tpath}.model",
+                    )
+                if len(t.model) > MAX_TURN_MODEL_CHARS:
+                    raise PromptSchemaError(
+                        f"model exceeds {MAX_TURN_MODEL_CHARS} chars",
+                        path=f"{tpath}.model",
+                    )
 
         for j, call in enumerate(t.tool_calls):
             cpath = f"{tpath}.tool_calls[{j}]"
@@ -841,6 +893,7 @@ __all__ = [
     "VALID_VISIBILITIES",
     "DEFAULT_VISIBILITY",
     "MAX_TURN_TEXT_CHARS",
+    "MAX_TURN_MODEL_CHARS",
     "MAX_USER_TEXT_CHARS",
     "PromptSchemaError",
     "ToolCall",

@@ -63,7 +63,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import unquote, urlparse
 
-from ..prompts.schema import Session, Turn, validate_session
+from ..prompts.schema import MAX_TURN_MODEL_CHARS, Session, Turn, validate_session
 from ..prompts.text_sanitize import sanitize_for_toml_text
 
 
@@ -481,6 +481,14 @@ def _build_session(
         elif btype == _BUBBLE_TYPE_ASSISTANT:
             text = _bubble_text(bubble)
             summary = _first_sentence(text)
+            bubble_model: str | None = None
+            model_info = bubble.get("modelInfo")
+            if isinstance(model_info, dict):
+                m = model_info.get("modelName") or model_info.get("model")
+                if isinstance(m, str) and m.strip():
+                    bubble_model = m.strip()[:MAX_TURN_MODEL_CHARS]
+                    if builder.model is None:
+                        builder.model = bubble_model
             # If the bubble had no human-readable text and we don't yet
             # extract Cursor's tool calls (deferred — see module-level
             # docstring), there's nothing meaningful to record.
@@ -493,14 +501,9 @@ def _build_session(
                     summary=summary or None,
                     text=preview_text,
                     at=at,
+                    model=bubble_model,
                 )
             )
-            # Surface Cursor's chosen model when the bubble exposes it.
-            model_info = bubble.get("modelInfo")
-            if isinstance(model_info, dict):
-                m = model_info.get("modelName") or model_info.get("model")
-                if isinstance(m, str) and m and builder.model is None:
-                    builder.model = m
         # Other bubble types (system / status) are dropped wholesale.
 
     session = builder.to_session(verbose=verbose, name=name)

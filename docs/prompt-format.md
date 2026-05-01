@@ -20,6 +20,16 @@ Prompts are a **first-class class of source**, not markdown in disguise.
 
 ---
 
+## Activity aggregates (Spec Cloud)
+
+The compiler still treats `.prompts` as **build input**, not telemetry. Separately, **Spec Cloud** may compute **read-only aggregates** for engineer profiles and bundle dashboards (contribution heatmaps, iteration depth, abandonment rate). Those metrics use only what capture already writes: `[[sessions.turns]]` timestamps and `role`, optional `ended_at`, optional `[sessions.commit].commit_sha`, and `operator` for attribution.
+
+Canonical definitions (quiet window, grace days, what “finished for counting” means) are published here:
+
+**https://spec.lightreach.io/docs/workflow**
+
+---
+
 ## One file per branch (v0.2)
 
 The central rule. The `.prompts` file for a branch lives at:
@@ -179,6 +189,7 @@ paths_touched = [
   [[sessions.turns]]
   role    = "assistant"
   at      = 2026-04-21T11:47:35Z
+  model   = "claude-sonnet-4-5"
   summary = "Mapping tax call sites before extraction."
 
     [[sessions.turns.tool_calls]]
@@ -288,10 +299,10 @@ files written before v0.2 introduced per-session attribution).
 A session is an ordered array of turns. The compiler reads them in
 array order; `at` is informational, not structural.
 
-| role          | Required fields       | Optional fields                    |
-| ------------- | --------------------- | ---------------------------------- |
-| `user`        | `role`, `text`        | `at`                               |
-| `assistant`   | `role`                | `at`, `summary`, `tool_calls`      |
+| role          | Required fields       | Optional fields                                    |
+| ------------- | --------------------- | -------------------------------------------------- |
+| `user`        | `role`, `text`        | `at`                                               |
+| `assistant`   | `role`                | `at`, `model`, `summary`, `tool_calls`             |
 | `tool_result` | reserved — disallowed in v0.1                            |
 
 Assistant turns MUST NOT carry `text` unless the session's `verbose` is
@@ -299,6 +310,11 @@ true. Use `summary` for short descriptions; regenerate full text with
 `spec prompts simulate`. Per-turn `text` (user, or assistant when
 `verbose = true`) is capped (512 KiB in the reference implementation;
 see `MAX_TURN_TEXT_CHARS` in `spec_cli.prompts.schema`).
+
+Optional per-turn `model` (string, ≤128 chars in the reference validator)
+records which LLM answered **that assistant turn**. User turns MUST NOT
+include `model`; session-level `sessions.model` remains for backward
+compatibility (typically first model seen in the thread).
 
 ### Tool calls
 
@@ -364,8 +380,10 @@ A `.prompts` file is valid iff:
    `source` ∈ `{claude_code, cursor, manual}`.
 7. Each session has at least one `[[turns]]` entry.
 8. Every turn has a `role` in the allowed set; `user` has `text` (per-turn
-   cap, 512 KiB in the reference validator); `assistant` has no `text`
-   unless `verbose = true` (same cap on stored `text` when verbose).
+   cap, 512 KiB in the reference validator) and no `model`; `assistant`
+   has no `text` unless `verbose = true` (same cap on stored `text` when
+   verbose). Assistant `model`, when present, is capped (128 chars in the
+   reference validator).
 9. `visibility` ∈ `{public, private}` if present (default `public`).
 10. `outcome` ∈ the enum if present.
 11. `tool_calls[].name` is in the allowlist OR dropped with a comment.
