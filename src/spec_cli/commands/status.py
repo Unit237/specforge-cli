@@ -9,22 +9,32 @@ from ..stage import classify_working_tree, load_index
 from ..ui import console, dim, fatal
 
 
-_STATE_ORDER = ["staged", "modified", "untracked", "deleted", "ignored", "clean"]
+_STATE_ORDER = [
+    "staged",
+    "staged_stale",
+    "unstaged_modified",
+    "untracked",
+    "deleted",
+    "ignored",
+    "clean",
+]
 _STATE_STYLE = {
     "staged": "sf.mint",
-    "modified": "yellow",
+    "staged_stale": "yellow",
+    "unstaged_modified": "yellow",
     "untracked": "sf.point",
     "deleted": "sf.reject",
     "ignored": "sf.muted",
     "clean": "sf.muted",
 }
 _STATE_LABEL = {
-    "staged": "staged",
-    "modified": "modified",
-    "untracked": "untracked",
+    "staged": "Staged for push",
+    "staged_stale": "Modified (re-run spec add — snapshot out of date)",
+    "unstaged_modified": "Not staged for push",
+    "untracked": "Untracked",
     "deleted": "deleted",
     "ignored": "ignored (not bundle content)",
-    "clean": "clean",
+    "clean": "clean (matches last push)",
 }
 
 
@@ -46,14 +56,12 @@ _STATE_LABEL = {
 def status_cmd(show_all: bool, show_ignored: bool) -> None:
     """Show what would be pushed from this bundle.
 
-    By default the listing is the *actionable* set: staged, modified,
-    untracked, and deleted bundle paths. ``ignored`` (anything the
-    resolver classifies as not bundle content — ``README.md``,
-    ``package.json``, ``node_modules/…``) and ``clean`` rows stay
-    hidden because they don't change what ``spec push`` is about to
-    do. ``--ignored`` brings them back when you need to debug "why
-    isn't this file in my bundle?"; ``--all`` is the everything-on
-    surface (clean + ignored + the rest).
+    Section names mirror **git status**: **Staged for push** is the snapshot
+    queued for ``spec push`` (like changes to be committed). **Modified**
+    splits into paths whose staged hash is stale vs paths only tracked from
+    a prior push that still need ``spec add`` — both mean "run ``spec add``"
+    before push picks them up. By default, **clean** (matches last push) and
+    **ignored** rows are hidden. Use ``--ignored`` / ``--all`` for full tree.
     """
     try:
         root = find_bundle_root()

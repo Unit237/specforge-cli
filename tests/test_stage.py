@@ -134,6 +134,32 @@ def test_sha256_stable():
     assert sha256(b"hi") != sha256(b"ho")
 
 
+def test_classify_splits_git_like_modified_states(tmp_path: Path) -> None:
+    root = _make_bundle(tmp_path)
+    doc = root / "docs" / "product.md"
+    idx = load_index(root)
+    doc_h = sha256(doc.read_bytes())
+
+    idx.staged["docs/product.md"] = doc_h
+    idx.staged["spec.yaml"] = sha256((root / "spec.yaml").read_bytes())
+    lines = classify_working_tree(root, idx)
+    by_rel = {ln.rel: ln.state for ln in lines if ln.kind != "other"}
+    assert by_rel["docs/product.md"] == "staged"
+
+    doc.write_text("# edited\n", encoding="utf-8")
+    lines2 = classify_working_tree(root, idx)
+    by_rel2 = {ln.rel: ln.state for ln in lines2 if ln.kind != "other"}
+    assert by_rel2["docs/product.md"] == "staged_stale"
+
+    idx2 = load_index(root)
+    idx2.staged.clear()
+    idx2.staged["spec.yaml"] = sha256((root / "spec.yaml").read_bytes())
+    idx2.pushed["docs/product.md"] = doc_h
+    lines3 = classify_working_tree(root, idx2)
+    by_rel3 = {ln.rel: ln.state for ln in lines3 if ln.kind != "other"}
+    assert by_rel3["docs/product.md"] == "unstaged_modified"
+
+
 # ---------------------------------------------------------------------------
 # Bundle-path aliases (Fix #2): index remembers every location the bundle
 # has lived at so a folder rename doesn't orphan its prompt history.

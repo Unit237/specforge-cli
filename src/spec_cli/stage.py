@@ -8,7 +8,7 @@ We intentionally do NOT try to be git. We track:
   - pushed[path]  = sha256 of the content last successfully pushed
 
 From these two plus the current working-tree content, `spec status` can
-classify every file as staged / modified / untracked / clean without any
+classify every file as staged / stale / unstaged-changes / untracked / clean without any
 network.
 """
 
@@ -240,7 +240,7 @@ def walk_all_files(root: Path) -> Iterable[Path]:
 class StatusLine:
     rel: str
     kind: str              # "md" | "prompts" | "settings" | "other"
-    state: str             # "staged" | "modified" | "untracked" | "clean" | "ignored" | "deleted"
+    state: str             # "staged" | "staged_stale" | "unstaged_modified" | "untracked" | "clean" | "ignored" | "deleted"
     hash: str | None = None
 
 
@@ -281,12 +281,15 @@ def classify_working_tree(
             if idx.staged[rel] == h:
                 lines.append(StatusLine(rel=rel, kind=kind, state="staged", hash=h))
             else:
-                lines.append(StatusLine(rel=rel, kind=kind, state="modified", hash=h))
+                # Like git: staged snapshot exists but the working tree moved on.
+                lines.append(StatusLine(rel=rel, kind=kind, state="staged_stale", hash=h))
         elif rel in idx.pushed:
             if idx.pushed[rel] == h:
                 lines.append(StatusLine(rel=rel, kind=kind, state="clean", hash=h))
             else:
-                lines.append(StatusLine(rel=rel, kind=kind, state="modified", hash=h))
+                # Tracked from a prior push but not in the current staged set (or
+                # staged entry was cleared); disk differs from last push — run spec add.
+                lines.append(StatusLine(rel=rel, kind=kind, state="unstaged_modified", hash=h))
         else:
             lines.append(StatusLine(rel=rel, kind=kind, state="untracked", hash=h))
 

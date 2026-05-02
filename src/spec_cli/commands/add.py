@@ -28,7 +28,13 @@ from ..ui import dim, fatal, info, ok, reject
         "sessions swept into this commit."
     ),
 )
-def add_cmd(paths: tuple[str, ...], no_capture: bool) -> None:
+@click.option(
+    "-v",
+    "--verbose",
+    is_flag=True,
+    help="List every path that was already staged at the current on-disk content.",
+)
+def add_cmd(paths: tuple[str, ...], no_capture: bool, verbose: bool) -> None:
     """
     Stage files for the next push.
 
@@ -48,6 +54,9 @@ def add_cmd(paths: tuple[str, ...], no_capture: bool) -> None:
     expectation for "stage everything for this commit": the AI
     conversations that produced it are part of "everything". Pass
     `--no-capture` to opt out.
+
+    Output lists only paths whose staged hash **changed**. Paths already
+    staged at the current bytes are summarized unless you pass ``-v``.
     """
     try:
         root = find_bundle_root()
@@ -140,8 +149,16 @@ def add_cmd(paths: tuple[str, ...], no_capture: bool) -> None:
 
     for rel in staged:
         ok(f"staged [bold]{rel}[/]")
-    for rel in unchanged:
-        dim(f"unchanged {rel}")
+
+    if unchanged:
+        if verbose:
+            for rel in unchanged:
+                dim(f"unchanged {rel}")
+        else:
+            dim(
+                f"{len(unchanged)} path(s) already staged at current content "
+                "(unchanged). Pass -v to list."
+            )
 
     if rejected and not staged:
         raise SystemExit(1)

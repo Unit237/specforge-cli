@@ -123,7 +123,7 @@ the compiler sees on the next run — see
 | Command | Purpose |
 |---|---|
 | `spec init` | Scaffold `spec.yaml`, `docs/product.md`, `prompts/scaffold.md`, `prompts/sessions/`, and `AGENTS.md`. |
-| `spec status` | Show staged / modified / untracked / ignored files. |
+| `spec status` | Git-like sections: staged for push, modified (out-of-date snapshot vs not staged), untracked, etc. |
 | `spec add <paths…>` | Stage files. Rejects non-spec extensions explicitly. |
 | `spec push [URL]` | Upload the staged snapshot to Cloud, in 10-file batches. Accepts a `git`-style URL (see below). |
 | `spec pull [URL]` | Pull the latest bundle state into the working tree. `--force` to overwrite local changes. Accepts the same URL form as `push`. |
