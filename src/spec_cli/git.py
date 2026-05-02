@@ -59,6 +59,77 @@ def _run_git(args: list[str], *, cwd: Path) -> str | None:
     return out or None
 
 
+def commit_gpgsign_enabled(root: Path) -> bool:
+    """True when ``commit.gpgsign`` is enabled — pending-commit SHA prediction
+    cannot match gpg-signed commits, so hooks skip prediction."""
+    return _run_git(["config", "--bool", "commit.gpgsign"], cwd=root) == "true"
+
+
+def pending_commit_parents(root: Path) -> list[str]:
+    """Parents git will use for the commit currently being built.
+
+    Merge commits use ``HEAD`` then ``MERGE_HEAD``. The initial commit has
+    no parents. Best-effort only (exotic states like octopus merges are
+    not modelled).
+    """
+    merge = _run_git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=root)
+    head = _run_git(["rev-parse", "-q", "--verify", "HEAD"], cwd=root)
+    if merge:
+        if head:
+            return [head, merge]
+        return [merge]
+    if head:
+        return [head]
+    return []
+
+
+def predict_commit_object_sha(root: Path, message: bytes) -> str | None:
+    """Return the SHA-1 of the commit object git is about to create, or
+    ``None`` on failure.
+
+    Intended for ``commit-msg`` hooks, **after** ``git add`` has updated
+    the index to the tree you mean to commit. ``message`` must be the
+    exact proposed commit message bytes (the contents of the path git
+    passes to the hook).
+    """
+    tree = _run_git(["write-tree"], cwd=root)
+    if not tree:
+        return None
+    parents = pending_commit_parents(root)
+    author = _run_git(["var", "GIT_AUTHOR_IDENT"], cwd=root)
+    committer = _run_git(["var", "GIT_COMMITTER_IDENT"], cwd=root)
+    if not author or not committer:
+        return None
+
+    parts: list[bytes] = [f"tree {tree}\n".encode("ascii")]
+    for p in parents:
+        parts.append(f"parent {p}\n".encode("ascii"))
+    parts.append(f"author {author}\n".encode("utf-8"))
+    parts.append(f"committer {committer}\n".encode("utf-8"))
+    parts.append(b"\n")
+    parts.append(message)
+    body = b"".join(parts)
+
+    if shutil.which("git") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "hash-object", "-t", "commit", "--stdin"],
+            cwd=str(root),
+            input=body,
+            capture_output=True,
+            text=False,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    out = (result.stdout or b"").decode("ascii", errors="replace").strip()
+    return out or None
+
+
 def read_git_context(root: Path) -> GitContext:
     """Gather the git context for a bundle root. Safe to call anywhere."""
     ctx = GitContext()
@@ -143,7 +214,10 @@ def repo_toplevel(root: Path) -> Path | None:
 
 __all__ = [
     "GitContext",
+    "commit_gpgsign_enabled",
     "find_git_dir",
+    "pending_commit_parents",
+    "predict_commit_object_sha",
     "read_git_context",
     "read_origin_url",
     "repo_toplevel",

@@ -67,9 +67,10 @@ spec compile
 
 `spec init` inside a git repo installs **pre-commit** (mirrors `git add` into
 `spec add` / `spec unstage` for bundle paths, including **renames**),
-**post-commit** (`spec prompts capture`), and **pre-push** (`spec push` when you
-`git push` a branch). Refresh with `spec git-hooks install`. Skip Spec upload on
-push with `SKIP_SPEC_PUSH=1`, or skip all hooks with `git push --no-verify`.
+**commit-msg** (`spec git-hooks commit-msg` — runs capture and stages `.prompts`
+into the **same** commit), and **pre-push** (`spec push` when you `git push` a
+branch). Refresh with `spec git-hooks install`. Skip Spec upload on push with
+`SKIP_SPEC_PUSH=1`, or skip all hooks with `git push --no-verify`.
 Multi-bundle monorepos: set `SPEC_BUNDLE_ROOT` to the bundle directory.
 
 Semantics (capture timing, disk vs. last `spec add`, auxiliary Markdown): see the

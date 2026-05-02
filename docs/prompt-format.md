@@ -26,7 +26,7 @@ The compiler still treats `.prompts` as **build input**, not telemetry. Separate
 
 Canonical definitions (quiet window, grace days, what “finished for counting” means) are published here:
 
-**https://spec.lightreach.io/docs/workflow**
+**https://spec.lightreach.io/docs#activity-metrics**
 
 ---
 

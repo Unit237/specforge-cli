@@ -73,7 +73,7 @@ def test_capture_appends_idempotently(tmp_path: Path) -> None:
     dest = _branch_prompts_path(bundle, "main")
 
     s1 = _make_session("aaa")
-    n = _merge_into_branch_file(
+    n, ids = _merge_into_branch_file(
         dest,
         branch="main",
         author_name="Alice",
@@ -81,10 +81,11 @@ def test_capture_appends_idempotently(tmp_path: Path) -> None:
         new_sessions=[s1],
     )
     assert n == 1
+    assert ids == frozenset({"aaa"})
     assert dest.exists()
 
     # Same session id, second time around — must be a no-op write.
-    n = _merge_into_branch_file(
+    n, ids = _merge_into_branch_file(
         dest,
         branch="main",
         author_name="Alice",
@@ -92,6 +93,7 @@ def test_capture_appends_idempotently(tmp_path: Path) -> None:
         new_sessions=[s1],
     )
     assert n == 0
+    assert ids == frozenset()
     pf = read_prompts_file(dest)
     assert len(pf.sessions) == 1
 
@@ -112,7 +114,7 @@ def test_capture_appends_new_sessions_in_started_at_order(tmp_path: Path) -> Non
         author_email="alice@example.com",
         new_sessions=[s1],
     )
-    n = _merge_into_branch_file(
+    n, _ids = _merge_into_branch_file(
         dest,
         branch="main",
         author_name="Alice",

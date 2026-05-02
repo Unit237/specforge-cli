@@ -101,21 +101,25 @@ POST_COMMIT_HOOK_BEGIN: str = "# >>> spec post-commit >>>"
 POST_COMMIT_HOOK_END: str = "# <<< spec post-commit <<<"
 POST_COMMIT_HOOK_BODY: str = f"""\
 {POST_COMMIT_HOOK_BEGIN}
-# Auto-installed by `spec init`. Captures new conversational
-# sessions into prompts/<timestamp>.prompts after every commit, so a
-# single `git commit` produces both the code delta and the trail of
-# prompts that produced it.
-#
-# Safe to delete; re-run `spec init` to reinstall.
+# Deprecated: prompts capture moved to the commit-msg hook so `.prompts`
+# updates are staged into the same git commit. This block is left behind only
+# so `spec git-hooks install` can retire older post-commit scripts.
+{POST_COMMIT_HOOK_END}
+"""
+
+COMMIT_MSG_HOOK_BEGIN: str = "# >>> spec commit-msg >>>"
+COMMIT_MSG_HOOK_END: str = "# <<< spec commit-msg <<<"
+COMMIT_MSG_HOOK_BODY: str = f"""\
+{COMMIT_MSG_HOOK_BEGIN}
+# Auto-installed by `spec init`. Runs before git records the commit: captures
+# new sessions into prompts/<branch>.prompts and git-adds them so they ship in
+# the same commit. Failures are swallowed — capture never blocks a commit.
 if command -v spec >/dev/null 2>&1; then
-  # --source all is the default; --since filter is off so we pick up
-  # anything captured between commits. Non-zero is swallowed: we never
-  # want a capture failure to block a commit.
-  spec prompts capture || true
+  spec git-hooks commit-msg "$1" || true
 else
   echo "spec: CLI not on PATH; skipping prompts capture." >&2
 fi
-{POST_COMMIT_HOOK_END}
+{COMMIT_MSG_HOOK_END}
 """
 
 PRE_PUSH_HOOK_BEGIN: str = "# >>> spec pre-push >>>"
@@ -146,12 +150,20 @@ GIT_HOOK_INSTALL_ROWS: list[tuple[str, str, str, str, str, str]] = [
         "#!/bin/sh\n\n",
     ),
     (
+        "commit-msg",
+        "commit-msg",
+        COMMIT_MSG_HOOK_BEGIN,
+        COMMIT_MSG_HOOK_END,
+        COMMIT_MSG_HOOK_BODY,
+        "#!/bin/sh\n\n",
+    ),
+    (
         "post-commit",
         "post-commit",
         POST_COMMIT_HOOK_BEGIN,
         POST_COMMIT_HOOK_END,
         POST_COMMIT_HOOK_BODY,
-        "#!/bin/sh\nset -e\n\n",
+        "#!/bin/sh\n\n",
     ),
     (
         "pre-push",
@@ -191,8 +203,8 @@ schema = "spec.prompts/v0.1"
 #
 # One `.prompts` file == one commit. Inside, each `[[sessions]]` block is
 # one conversation that contributed to this commit — there can be many.
-# `spec prompts capture` (run automatically after each git commit via the
-# git hook from `spec init`) appends new captured sessions here; you can
+# `spec prompts capture` (run automatically from the commit-msg git hook
+# installed by `spec init`) appends new captured sessions here; you can
 # also hand-edit this
 # file to rewrite history (title / summary / lesson / outcome) before
 # pushing. The compiler routes each session to the LLM pinned in
@@ -505,7 +517,7 @@ def _stage_scaffold_for_push(
 @click.option(
     "--skip-git-hook",
     is_flag=True,
-    help="Don't install Spec git hooks (pre-commit, post-commit, pre-push).",
+    help="Don't install Spec git hooks (pre-commit, commit-msg, post-commit stub, pre-push).",
 )
 @click.option(
     "--skip-gitignore",
@@ -587,7 +599,7 @@ def init_cmd(
     # project conventions.
     agents_written = _write_if_missing(root / AGENTS_FILENAME, _STARTER_AGENTS)
 
-    # Git hooks: pre-commit mirrors git↔spec staging, post-commit captures
+    # Git hooks: pre-commit mirrors git↔spec staging, commit-msg captures
     # prompts, pre-push runs `spec push`. Skipped outside a git worktree or
     # with --skip-git-hook.
     hook_reports: list[tuple[str, Path, str]] = []
@@ -653,7 +665,7 @@ def init_cmd(
     if hook_reports:
         dim(
             "Git hooks: pre-commit → `spec git-hooks pre-commit` · "
-            "post-commit → `spec prompts capture` · "
+            "commit-msg → `spec git-hooks commit-msg` · "
             "pre-push → `spec git-hooks pre-push` "
             "(skip push: SKIP_SPEC_PUSH=1 or git push --no-verify)"
         )

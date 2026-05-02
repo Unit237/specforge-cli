@@ -1,7 +1,8 @@
-"""Git hook helpers — `spec git-hooks pre-commit` / `pre-push`.
+"""Git hook helpers — `spec git-hooks pre-commit` / `commit-msg` / `pre-push`.
 
-Installed by `spec init` so `git commit` mirrors spec staging + captures prompts,
-and `git push` runs `spec push` for the same bundle.
+Installed by `spec init` so `git commit` mirrors spec staging, captures prompts
+into the **same** commit (via the ``commit-msg`` hook), and `git push` runs
+`spec push` for the same bundle.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from ..config import BundleNotFoundError, find_bundle_root, load_manifest
 from ..constants import MANIFEST_FILENAME, is_bundle_path, is_spec_file
 from ..frontmatter import read_frontmatter
 from ..git import repo_toplevel
+
+from .prompts import run_capture_for_commit_msg_hook
 
 
 def _spec_cmd_prefix() -> list[str]:
@@ -275,6 +278,28 @@ def run_git_hook_pre_commit() -> None:
             _run_spec(bundle, prefix, "add", inner)
 
 
+def run_git_hook_commit_msg(commit_msg_file: str) -> None:
+    """Capture prompts into the pending git commit (never blocks the commit)."""
+    path = Path(commit_msg_file)
+    if not path.is_file():
+        return
+    try:
+        message_bytes = path.read_bytes()
+    except OSError:
+        return
+    top = repo_toplevel(Path.cwd())
+    if top is None:
+        return
+    bundle = resolve_bundle_root_for_git_hook(top)
+    if bundle is None:
+        return
+    run_capture_for_commit_msg_hook(
+        bundle,
+        repo_top=top,
+        message_bytes=message_bytes,
+    )
+
+
 def run_git_hook_pre_push() -> int:
     """Run ``spec push`` for the resolved bundle. ``SKIP_SPEC_PUSH=1`` skips."""
     if os.environ.get("SKIP_SPEC_PUSH", "").strip() == "1":
@@ -316,6 +341,13 @@ def git_hooks_group() -> None:
 def git_hooks_pre_commit_cmd() -> None:
     """Sync spec staging with paths you staged in git (never blocks the commit)."""
     run_git_hook_pre_commit()
+
+
+@git_hooks_group.command("commit-msg")
+@click.argument("commit_msg_file", type=str)
+def git_hooks_commit_msg_cmd(commit_msg_file: str) -> None:
+    """Stage ``.prompts`` updates into the commit git is recording (hook entrypoint)."""
+    run_git_hook_commit_msg(commit_msg_file)
 
 
 @git_hooks_group.command("pre-push")
@@ -364,6 +396,7 @@ __all__ = [
     "discover_bundle_roots_under_git_root",
     "git_hooks_group",
     "resolve_bundle_root_for_git_hook",
+    "run_git_hook_commit_msg",
     "run_git_hook_pre_commit",
     "run_git_hook_pre_push",
 ]

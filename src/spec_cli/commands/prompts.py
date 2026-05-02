@@ -25,6 +25,7 @@ lifecycle in prose.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,7 +38,11 @@ from ..constants import (
     PROMPTS_DIRNAME,
     PROMPTS_PENDING_DIRNAME,
 )
-from ..git import read_git_context
+from ..git import (
+    commit_gpgsign_enabled,
+    predict_commit_object_sha,
+    read_git_context,
+)
 from ..prompts import (
     CommitMeta,
     PromptSchemaError,
@@ -78,6 +83,54 @@ from ..ui import console, dim, fatal, info, ok, pointer, reject, warn
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+_COMMIT_SHA_FROM_GIT = object()
+
+
+def _git_stage_paths(repo_top: Path, paths: list[Path]) -> None:
+    """``git add --`` each path relative to ``repo_top`` (no-op if git missing)."""
+    if shutil.which("git") is None or not paths:
+        return
+    for p in paths:
+        try:
+            rel = p.resolve().relative_to(repo_top.resolve())
+        except ValueError:
+            continue
+        subprocess.run(
+            ["git", "-C", str(repo_top), "add", "--", str(rel)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+
+def _patch_branch_file_commit_shas(
+    dest: Path,
+    *,
+    session_ids: frozenset[str],
+    commit_sha: str | None,
+) -> bool:
+    """Rewrite ``commit_sha`` on selected sessions; return True if the file changed."""
+    if not session_ids or not dest.exists():
+        return False
+    try:
+        pf = read_prompts_file(dest)
+    except PromptSchemaError:
+        return False
+    changed = False
+    for s in pf.sessions:
+        if s.id not in session_ids or s.commit is None:
+            continue
+        if s.commit.commit_sha != commit_sha:
+            s.commit.commit_sha = commit_sha
+            changed = True
+    if not changed:
+        return False
+    dest.write_text(render_prompts_file(pf), encoding="utf-8")
+    return True
+
+
 
 
 def _prompts_dir(bundle_root: Path) -> Path:
@@ -134,7 +187,13 @@ def _branch_prompts_path(bundle_root: Path, branch: str) -> Path:
     return prompts_root(bundle_root) / branch_prompts_filename(branch)
 
 
-def _stamp_capture_commit(session: Session, *, git, fallback_branch: str) -> None:
+def _stamp_capture_commit(
+    session: Session,
+    *,
+    git,
+    fallback_branch: str,
+    commit_sha: str | None | object = _COMMIT_SHA_FROM_GIT,
+) -> None:
     """Stamp per-session commit context onto a freshly-discovered Session.
 
     The agent-side adapters (`read_claude_code_sessions`,
@@ -142,12 +201,20 @@ def _stamp_capture_commit(session: Session, *, git, fallback_branch: str) -> Non
     local store. We attach the *current* git context here so each
     session in the captured file carries its own attribution, even
     when the file ends up holding many commits over time.
+
+    Pass ``commit_sha=None`` for hook flows that fill the real SHA after
+    ``git add`` (see ``run_capture_for_commit_msg_hook``).
     """
     if session.commit is not None:
         return
+    resolved: str | None
+    if commit_sha is _COMMIT_SHA_FROM_GIT:
+        resolved = git.commit_sha
+    else:
+        resolved = commit_sha  # type: ignore[assignment]
     session.commit = SessionCommit(
         branch=git.branch or fallback_branch,
-        commit_sha=git.commit_sha,
+        commit_sha=resolved,
         author_name=git.author_name,
         author_email=git.author_email,
     )
@@ -160,14 +227,14 @@ def _merge_into_branch_file(
     author_name: str,
     author_email: str,
     new_sessions: list[Session],
-) -> int:
+) -> tuple[int, frozenset[str]]:
     """Append `new_sessions` to the branch file at `dest`.
 
     Idempotent on session id: a session already present in the file
     is dropped. Re-renders the whole file deterministically so two
     captures with the same input produce byte-identical output.
 
-    Returns the number of *new* sessions actually written.
+    Returns ``(added_count, ids_appended)``.
     """
     existing: PromptsFile | None
     if dest.exists():
@@ -203,14 +270,17 @@ def _merge_into_branch_file(
             edits=existing.edits,
         )
         added = len(appended)
+        appended_ids = frozenset(s.id for s in appended)
 
     if added == 0:
-        return 0
+        return 0, frozenset()
 
     body = render_prompts_file(merged)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(body, encoding="utf-8")
-    return added
+    if existing is None:
+        appended_ids = frozenset(s.id for s in new_sessions)
+    return added, appended_ids
 
 
 def run_auto_capture(bundle_root: Path) -> Path | None:
@@ -286,7 +356,7 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
 
     dest = _branch_prompts_path(bundle_root, branch)
     try:
-        added = _merge_into_branch_file(
+        added, _appended_ids = _merge_into_branch_file(
             dest,
             branch=branch,
             author_name=author_name,
@@ -302,6 +372,128 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
     rel_dest = f"{PROMPTS_DIRNAME}/{dest.name}"
     info(f"captured {added} new session(s) → {rel_dest}")
     return dest
+
+
+def run_capture_for_commit_msg_hook(
+    bundle_root: Path,
+    *,
+    repo_top: Path,
+    message_bytes: bytes,
+) -> None:
+    """Run capture while git is building a commit (``commit-msg`` hook).
+
+    Writes sessions with ``commit_sha`` unset, ``git add``s the branch
+    ``.prompts`` file so it enters the index, predicts the pending commit
+    SHA from the message bytes git passed to the hook, then patches the
+    file and stages again. Swallows nearly all failures — hooks must not
+    block ``git commit``.
+    """
+    try:
+        skip_predict = commit_gpgsign_enabled(repo_top)
+        record_bundle_path(bundle_root)
+        paths_for_lookup = historical_bundle_paths(bundle_root)
+
+        claude_store = claude_code_store_root()
+        cursor_store = cursor_workspace_storage_root()
+        claude_available = claude_store.exists()
+        cursor_available = cursor_store.exists()
+        if not claude_available and not cursor_available:
+            dim("No coding-agent stores found on this machine.")
+            return
+
+        git = read_git_context(bundle_root)
+        author_name = git.author_name or "unknown"
+        author_email = git.author_email or "unknown@unknown"
+        branch = git.branch or "detached"
+        warn_non_git = not git.is_repo
+
+        already_captured = _existing_session_ids(bundle_root)
+        discovered: list[Session] = []
+
+        if claude_available:
+            try:
+                for session in read_claude_code_sessions(
+                    paths_for_lookup, since=None, verbose=True
+                ):
+                    if session.id in already_captured:
+                        continue
+                    already_captured.add(session.id)
+                    discovered.append(session)
+            except ClaudeCodeError:
+                return
+
+        if cursor_available:
+            try:
+                for session in read_cursor_sessions(
+                    paths_for_lookup, since=None, verbose=True
+                ):
+                    if session.id in already_captured:
+                        continue
+                    already_captured.add(session.id)
+                    discovered.append(session)
+            except CursorError:
+                return
+
+        if not discovered:
+            dim("No new sessions to capture.")
+            return
+
+        for s in discovered:
+            if s.operator is None:
+                s.operator = author_email
+            _stamp_capture_commit(
+                s, git=git, fallback_branch=branch, commit_sha=None
+            )
+
+        dest = _branch_prompts_path(bundle_root, branch)
+        try:
+            added, appended_ids = _merge_into_branch_file(
+                dest,
+                branch=branch,
+                author_name=author_name,
+                author_email=author_email,
+                new_sessions=discovered,
+            )
+        except PromptSchemaError:
+            return
+
+        if added == 0:
+            dim("No new sessions to capture (already present in branch file).")
+            return
+
+        rel_dest = f"{PROMPTS_DIRNAME}/{dest.name}"
+        console.print(
+            f"[sf.label]prompts capture[/] [sf.muted]· "
+            f"{added} new session(s) → {rel_dest}[/]"
+        )
+        if warn_non_git:
+            dim(
+                "Not a git worktree — writing `branch=detached` and "
+                "`author=unknown` into [commit]. You'll want to hand-edit "
+                "those before pushing."
+            )
+
+        _git_stage_paths(repo_top, [dest])
+
+        predicted: str | None = None
+        if not skip_predict:
+            predicted = predict_commit_object_sha(repo_top, message_bytes)
+
+        if predicted and appended_ids:
+            if _patch_branch_file_commit_shas(
+                dest,
+                session_ids=appended_ids,
+                commit_sha=predicted,
+            ):
+                _git_stage_paths(repo_top, [dest])
+
+        pointer("wrote", str(dest.relative_to(bundle_root)))
+        dim(
+            "Branch captures are append-only. Push from a non-trunk branch "
+            "and open a review in Spec Cloud to merge into trunk's prompts."
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -377,10 +569,11 @@ def capture_cmd(
     not yet been written to a ``.prompts`` file is included, which can be
     many. Use ``--max-sessions`` or ``--since`` to cap the batch.
 
-    Writes `prompts/captured/<UTC-timestamp>.prompts`, containing
-    a `[commit]` block (from your git context) plus one `[[sessions]]` block
-    per discovered session. Run after each commit, or wire into a post-commit
-    hook; sessions already captured in any prior `.prompts` file are skipped.
+    Writes ``prompts/<branch-slug>.prompts`` with a ``[commit]`` block (from
+    your git context) plus one ``[[sessions]]`` block per discovered session.
+    With ``spec init`` hooks, this runs from git's ``commit-msg`` hook so new
+    prompts bytes are part of the same commit; sessions already captured in
+    any prior ``.prompts`` file are skipped.
 
     By default each assistant turn carries a bounded `text` preview
     (first ~3 KB of the response), in addition to the one-sentence
@@ -554,7 +747,7 @@ def capture_cmd(
         return
 
     try:
-        added = _merge_into_branch_file(
+        added, _appended_ids = _merge_into_branch_file(
             dest,
             branch=branch,
             author_name=author_name,
