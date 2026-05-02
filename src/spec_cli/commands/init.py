@@ -11,6 +11,7 @@ from pathlib import Path
 import click
 
 from ..constants import MANIFEST_FILENAME, PROMPTS_DIRNAME
+from ..git import find_git_dir
 from ..sources.claude_code import claude_code_store_root
 from ..ui import dim, fatal, info, ok, pointer
 
@@ -76,13 +77,26 @@ out/           # Default `spec compile` output target — regenerated.
 {GITIGNORE_BLOCK_END}
 """
 
-# The `.git/hooks/post-commit` we install. Contract:
-#   - Runs `spec prompts capture` after every commit.
-#   - Non-fatal: if the CLI is missing or capture errors, we print a hint
-#     and exit 0 so a capture failure never blocks a commit.
-#   - Idempotent: the Spec-managed section is delimited by these
-#     sentinels so re-running `spec init` only replaces our block
-#     and leaves anything else alone.
+# Git hooks installed under `.git/hooks/`. Each block is non-destructive:
+# re-running `spec init` replaces only the Spec-managed segment between
+# the sentinels. `--skip-git-hook` skips all three.
+
+PRE_COMMIT_HOOK_BEGIN: str = "# >>> spec pre-commit >>>"
+PRE_COMMIT_HOOK_END: str = "# <<< spec pre-commit <<<"
+PRE_COMMIT_HOOK_BODY: str = f"""\
+{PRE_COMMIT_HOOK_BEGIN}
+# Auto-installed by `spec init`. Runs before the commit is recorded:
+# mirrors paths you `git add`-ed into `spec add` (and removals into
+# `spec unstage`) so spec staging tracks the same bundle files as git.
+# Never blocks the commit — failures are swallowed per line below.
+if command -v spec >/dev/null 2>&1; then
+  spec git-hooks pre-commit || true
+else
+  echo "spec: CLI not on PATH; skipping spec/git index sync." >&2
+fi
+{PRE_COMMIT_HOOK_END}
+"""
+
 POST_COMMIT_HOOK_BEGIN: str = "# >>> spec post-commit >>>"
 POST_COMMIT_HOOK_END: str = "# <<< spec post-commit <<<"
 POST_COMMIT_HOOK_BODY: str = f"""\
@@ -103,6 +117,51 @@ else
 fi
 {POST_COMMIT_HOOK_END}
 """
+
+PRE_PUSH_HOOK_BEGIN: str = "# >>> spec pre-push >>>"
+PRE_PUSH_HOOK_END: str = "# <<< spec pre-push <<<"
+PRE_PUSH_HOOK_BODY: str = f"""\
+{PRE_PUSH_HOOK_BEGIN}
+# Auto-installed by `spec init`. Runs during `git push` for branch refs
+# so `spec push` runs in lockstep with git (same branch + SHA).
+# Skip with: SKIP_SPEC_PUSH=1 or git push --no-verify
+if [ "${{SKIP_SPEC_PUSH:-}}" != "1" ]; then
+  if command -v spec >/dev/null 2>&1; then
+    spec git-hooks pre-push || exit 1
+  else
+    echo "spec: CLI not on PATH; skipping spec push." >&2
+  fi
+fi
+{PRE_PUSH_HOOK_END}
+"""
+
+# Rows for `_install_git_hook_segment` — shared with `spec git-hooks install`.
+GIT_HOOK_INSTALL_ROWS: list[tuple[str, str, str, str, str, str]] = [
+    (
+        "pre-commit",
+        "pre-commit",
+        PRE_COMMIT_HOOK_BEGIN,
+        PRE_COMMIT_HOOK_END,
+        PRE_COMMIT_HOOK_BODY,
+        "#!/bin/sh\n\n",
+    ),
+    (
+        "post-commit",
+        "post-commit",
+        POST_COMMIT_HOOK_BEGIN,
+        POST_COMMIT_HOOK_END,
+        POST_COMMIT_HOOK_BODY,
+        "#!/bin/sh\nset -e\n\n",
+    ),
+    (
+        "pre-push",
+        "pre-push",
+        PRE_PUSH_HOOK_BEGIN,
+        PRE_PUSH_HOOK_END,
+        PRE_PUSH_HOOK_BODY,
+        "#!/bin/sh\nset -e\n\n",
+    ),
+]
 
 
 _STARTER_DOC = """# Product
@@ -132,8 +191,9 @@ schema = "spec.prompts/v0.1"
 #
 # One `.prompts` file == one commit. Inside, each `[[sessions]]` block is
 # one conversation that contributed to this commit — there can be many.
-# `spec prompts capture` (run automatically by the post-commit git
-# hook) appends new captured sessions here; you can also hand-edit this
+# `spec prompts capture` (run automatically after each git commit via the
+# git hook from `spec init`) appends new captured sessions here; you can
+# also hand-edit this
 # file to rewrite history (title / summary / lesson / outcome) before
 # pushing. The compiler routes each session to the LLM pinned in
 # `model` below.
@@ -309,62 +369,35 @@ def _render_starter_prompts(author_name: str, author_email: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _find_git_dir(root: Path) -> Path | None:
-    """Resolve the ``.git`` directory for ``root``.
+def _install_git_hook_segment(
+    git_dir: Path,
+    hook_filename: str,
+    begin_marker: str,
+    end_marker: str,
+    hook_body: str,
+    *,
+    fresh_header: str,
+) -> tuple[str, Path]:
+    """Install or update one Spec block inside ``.git/hooks/<hook_filename>``.
 
-    Handles the two common shapes:
-      - plain checkout: ``<root>/.git`` is a directory
-      - worktree / submodule: ``<root>/.git`` is a text file of the form
-        ``gitdir: /absolute/path/to/.git/worktrees/<name>``
-
-    Returns ``None`` when ``root`` isn't inside a git repo at all — init
-    still works, it just skips hook installation with a hint.
-    """
-    candidate = root / ".git"
-    if candidate.is_dir():
-        return candidate
-    if candidate.is_file():
-        try:
-            first = candidate.read_text(encoding="utf-8").strip().splitlines()[0]
-        except (OSError, UnicodeDecodeError):
-            return None
-        if first.startswith("gitdir:"):
-            target = Path(first.split(":", 1)[1].strip())
-            if not target.is_absolute():
-                target = (root / target).resolve()
-            if target.is_dir():
-                return target
-    # Walk upward in case init is run from a nested directory. `git rev-parse
-    # --show-toplevel` would be more correct, but spawning git just for this
-    # is heavyweight and this is already a best-effort convenience.
-    parent = root.parent
-    if parent != root:
-        return _find_git_dir(parent)
-    return None
-
-
-def _install_post_commit_hook(git_dir: Path) -> tuple[str, Path]:
-    """Install or update the Spec post-commit hook.
-
-    Returns ``(status, path)`` where ``status`` is one of:
-        "installed"  — fresh hook
-        "updated"    — replaced an existing Spec block in place
-        "appended"   — added our block to an existing user-authored hook
+    ``hook_body`` must include ``begin_marker`` … ``end_marker`` so re-init
+    can replace in place. ``fresh_header`` is used only when creating a new
+    hook file (use ``#!/bin/sh\\n\\n`` when ``set -e`` would be risky).
     """
     hooks_dir = git_dir / "hooks"
     hooks_dir.mkdir(exist_ok=True)
-    hook_path = hooks_dir / "post-commit"
+    hook_path = hooks_dir / hook_filename
 
     if not hook_path.exists():
-        hook_path.write_text("#!/bin/sh\nset -e\n\n" + POST_COMMIT_HOOK_BODY, encoding="utf-8")
+        hook_path.write_text(fresh_header + hook_body, encoding="utf-8")
         _chmod_executable(hook_path)
         return "installed", hook_path
 
     existing = hook_path.read_text(encoding="utf-8")
-    if POST_COMMIT_HOOK_BEGIN in existing and POST_COMMIT_HOOK_END in existing:
-        start = existing.index(POST_COMMIT_HOOK_BEGIN)
-        end = existing.index(POST_COMMIT_HOOK_END) + len(POST_COMMIT_HOOK_END)
-        updated = existing[:start] + POST_COMMIT_HOOK_BODY.rstrip() + existing[end:]
+    if begin_marker in existing and end_marker in existing:
+        start = existing.index(begin_marker)
+        end = existing.index(end_marker) + len(end_marker)
+        updated = existing[:start] + hook_body.rstrip() + existing[end:]
         if updated != existing:
             hook_path.write_text(updated, encoding="utf-8")
             _chmod_executable(hook_path)
@@ -373,7 +406,7 @@ def _install_post_commit_hook(git_dir: Path) -> tuple[str, Path]:
         return "updated", hook_path
 
     separator = "" if existing.endswith("\n") else "\n"
-    hook_path.write_text(existing + separator + "\n" + POST_COMMIT_HOOK_BODY, encoding="utf-8")
+    hook_path.write_text(existing + separator + "\n" + hook_body, encoding="utf-8")
     _chmod_executable(hook_path)
     return "appended", hook_path
 
@@ -472,7 +505,7 @@ def _stage_scaffold_for_push(
 @click.option(
     "--skip-git-hook",
     is_flag=True,
-    help="Don't install the post-commit hook even if this is a git repo.",
+    help="Don't install Spec git hooks (pre-commit, post-commit, pre-push).",
 )
 @click.option(
     "--skip-gitignore",
@@ -554,19 +587,22 @@ def init_cmd(
     # project conventions.
     agents_written = _write_if_missing(root / AGENTS_FILENAME, _STARTER_AGENTS)
 
-    # Git post-commit hook. Run capture automatically so a `git commit`
-    # produces both the code delta and the prompts that made it. Skipped
-    # when we're not inside a git worktree, or when --skip-git-hook is set.
-    hook_status: str | None = None
-    hook_path: Path | None = None
-    git_dir = _find_git_dir(root)
+    # Git hooks: pre-commit mirrors git↔spec staging, post-commit captures
+    # prompts, pre-push runs `spec push`. Skipped outside a git worktree or
+    # with --skip-git-hook.
+    hook_reports: list[tuple[str, Path, str]] = []
+    git_dir = find_git_dir(root)
     if not skip_git_hook and git_dir is not None:
         try:
-            hook_status, hook_path = _install_post_commit_hook(git_dir)
+            for label, fname, beg, end, body, hdr in GIT_HOOK_INSTALL_ROWS:
+                st, pth = _install_git_hook_segment(
+                    git_dir, fname, beg, end, body, fresh_header=hdr
+                )
+                hook_reports.append((label, pth, st))
         except OSError as e:
             # A read-only hooks dir shouldn't fail the whole init.
             info("")
-            dim(f"Could not install post-commit hook ({e}). Skipping.")
+            dim(f"Could not install git hooks ({e}). Skipping.")
 
     # Top-level `.gitignore` block. Lives at the worktree root (not the
     # bundle root, when they differ) so engineers see Spec's ignored
@@ -614,17 +650,30 @@ def init_cmd(
             "Staged for `spec push`: " + ", ".join(auto_staged) + "."
         )
 
-    if hook_status and hook_path is not None:
-        rel = hook_path.relative_to(root) if hook_path.is_relative_to(root) else hook_path
-        pointer("git hook    ", f".git/hooks/post-commit ({hook_status})")
-        dim(f"  runs `spec prompts capture` after every git commit ({rel})")
+    if hook_reports:
+        dim(
+            "Git hooks: pre-commit → `spec git-hooks pre-commit` · "
+            "post-commit → `spec prompts capture` · "
+            "pre-push → `spec git-hooks pre-push` "
+            "(skip push: SKIP_SPEC_PUSH=1 or git push --no-verify)"
+        )
+        for label, hook_path, st in hook_reports:
+            try:
+                rel = (
+                    hook_path.relative_to(root)
+                    if hook_path.is_relative_to(root)
+                    else hook_path
+                )
+            except ValueError:
+                rel = hook_path
+            pointer(f"git hook ({label})", f"{rel} ({st})")
     elif skip_git_hook:
         dim("Skipped git hook installation (--skip-git-hook).")
     elif git_dir is None:
         dim(
-            "Not a git worktree — skipped post-commit hook. Run "
-            "`git init && spec init --force` to install it, or wire "
-            "`spec prompts capture` into your workflow manually."
+            "Not a git worktree — skipped git hooks. Run "
+            "`git init && spec init --force` to install them, or wire "
+            "`spec prompts capture` / `spec push` manually."
         )
 
     if gitignore_status and gitignore_path is not None:

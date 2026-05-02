@@ -55,7 +55,7 @@ def _run_git(args: list[str], *, cwd: Path) -> str | None:
         return None
     if result.returncode != 0:
         return None
-    out = result.stdout.strip()
+    out = (result.stdout or "").strip()
     return out or None
 
 
@@ -98,6 +98,34 @@ def read_origin_url(root: Path) -> str | None:
     return out or None
 
 
+def find_git_dir(start: Path) -> Path | None:
+    """Resolve the ``.git`` directory for ``start``.
+
+    Handles plain checkouts (``.git`` is a directory), worktrees, and
+    submodules where ``.git`` is a ``gitdir:`` pointer file. Walks upward
+    from ``start`` when ``.git`` is missing — best-effort when ``start``
+    is a nested directory inside the worktree.
+    """
+    candidate = start / ".git"
+    if candidate.is_dir():
+        return candidate
+    if candidate.is_file():
+        try:
+            first = candidate.read_text(encoding="utf-8").strip().splitlines()[0]
+        except (OSError, UnicodeDecodeError):
+            return None
+        if first.startswith("gitdir:"):
+            target = Path(first.split(":", 1)[1].strip())
+            if not target.is_absolute():
+                target = (start / target).resolve()
+            if target.is_dir():
+                return target
+    parent = start.parent
+    if parent != start:
+        return find_git_dir(parent)
+    return None
+
+
 def repo_toplevel(root: Path) -> Path | None:
     """Resolve the worktree root via ``git rev-parse --show-toplevel``.
 
@@ -115,6 +143,7 @@ def repo_toplevel(root: Path) -> Path | None:
 
 __all__ = [
     "GitContext",
+    "find_git_dir",
     "read_git_context",
     "read_origin_url",
     "repo_toplevel",

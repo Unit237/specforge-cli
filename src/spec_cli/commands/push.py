@@ -159,7 +159,15 @@ def push_cmd(
         if not abs_path.is_file():
             reject(f"{rel} — file disappeared between add and push")
             continue
-        content = abs_path.read_text(encoding="utf-8")
+        raw_bytes = abs_path.read_bytes()
+        disk_h = sha256(raw_bytes)
+        recorded_h = idx.staged.get(rel)
+        if recorded_h is not None and recorded_h != disk_h:
+            warn(
+                f"{rel} — changed on disk since last `spec add`; "
+                "upload uses current bytes tagged with this git revision."
+            )
+        content = raw_bytes.decode(encoding="utf-8")
         payload.append(
             {
                 "path": rel,

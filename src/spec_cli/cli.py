@@ -7,6 +7,7 @@ import click
 from . import __version__
 from .commands.add import add_cmd
 from .commands.compile import compile_cmd
+from .commands.git_hooks import git_hooks_group
 from .commands.init import init_cmd
 from .commands.log import log_cmd
 from .commands.login import login_cmd, logout_cmd
@@ -33,6 +34,7 @@ def cli() -> None:
 
 
 cli.add_command(init_cmd)
+cli.add_command(git_hooks_group)
 cli.add_command(login_cmd)
 cli.add_command(logout_cmd)
 cli.add_command(status_cmd)
