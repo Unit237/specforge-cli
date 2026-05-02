@@ -423,6 +423,67 @@ def _install_git_hook_segment(
     return "appended", hook_path
 
 
+def _git_hook_body_is_shell_stub_only(text: str) -> bool:
+    """True if *text* is empty or only a minimal ``#!/bin/sh`` header (optional ``set -e``)."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return True
+    if lines == ["#!/bin/sh"]:
+        return True
+    if lines == ["#!/bin/sh", "set -e"]:
+        return True
+    return False
+
+
+def _uninstall_git_hook_segment(
+    git_dir: Path,
+    hook_filename: str,
+    begin_marker: str,
+    end_marker: str,
+) -> tuple[str, Path]:
+    """Remove the Spec block from ``.git/hooks/<hook_filename>``.
+
+    If the file is empty or only a shell stub after removal, delete the file.
+    Returns ``(status, path)`` where *status* is ``missing``, ``no_spec_block``,
+    ``removed`` (file deleted), or ``stripped`` (file kept with other content).
+    """
+    hook_path = git_dir / "hooks" / hook_filename
+    if not hook_path.is_file():
+        return "missing", hook_path
+    try:
+        existing = hook_path.read_text(encoding="utf-8")
+    except OSError:
+        return "no_spec_block", hook_path
+    if begin_marker not in existing or end_marker not in existing:
+        return "no_spec_block", hook_path
+    start = existing.index(begin_marker)
+    end = existing.index(end_marker) + len(end_marker)
+    before = existing[:start].rstrip()
+    after = existing[end:].lstrip()
+    if before and after:
+        updated = before + "\n\n" + after
+    elif before:
+        updated = before
+    elif after:
+        updated = after
+    else:
+        updated = ""
+    core = updated.strip()
+    if not core or _git_hook_body_is_shell_stub_only(core):
+        try:
+            hook_path.unlink()
+        except OSError:
+            return "no_spec_block", hook_path
+        return "removed", hook_path
+    out = updated if updated.endswith("\n") else updated + "\n"
+    try:
+        hook_path.write_text(out, encoding="utf-8")
+    except OSError:
+        return "no_spec_block", hook_path
+    _chmod_executable(hook_path)
+    return "stripped", hook_path
+
+
 def _chmod_executable(path: Path) -> None:
     # ``chmod +x`` without clobbering existing bits. No-op on Windows
     # (permissions aren't POSIX there; git for Windows ignores the bit

@@ -15,6 +15,12 @@ from spec_cli.commands.git_hooks import (
     run_git_hook_pre_commit,
     run_git_hook_pre_push,
 )
+from spec_cli.commands.init import (
+    PRE_COMMIT_HOOK_BEGIN,
+    PRE_COMMIT_HOOK_END,
+    PRE_COMMIT_HOOK_BODY,
+    _uninstall_git_hook_segment,
+)
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -205,3 +211,61 @@ def test_run_pre_push_skips_tag_only_push(tmp_path: Path, monkeypatch) -> None:
         io.StringIO("refs/tags/v1 deadbeef refs/tags/v1 deadbeef\n"),
     )
     assert run_git_hook_pre_push() == 0
+
+
+def test_uninstall_removes_spec_only_hook_file(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    git_dir = repo / ".git"
+    hook = git_dir / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\n\n" + PRE_COMMIT_HOOK_BODY, encoding="utf-8")
+    st, pth = _uninstall_git_hook_segment(
+        git_dir, "pre-commit", PRE_COMMIT_HOOK_BEGIN, PRE_COMMIT_HOOK_END
+    )
+    assert st == "removed"
+    assert pth == hook
+    assert not hook.exists()
+
+
+def test_uninstall_strips_block_keeps_user_content(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    git_dir = repo / ".git"
+    hook = git_dir / "hooks" / "pre-commit"
+    user = "#!/bin/sh\n\necho user-hook\n"
+    hook.write_text(user + "\n" + PRE_COMMIT_HOOK_BODY, encoding="utf-8")
+    st, _ = _uninstall_git_hook_segment(
+        git_dir, "pre-commit", PRE_COMMIT_HOOK_BEGIN, PRE_COMMIT_HOOK_END
+    )
+    assert st == "stripped"
+    left = hook.read_text(encoding="utf-8")
+    assert "user-hook" in left
+    assert PRE_COMMIT_HOOK_BEGIN not in left
+
+
+def test_uninstall_missing_hook(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    git_dir = repo / ".git"
+    st, pth = _uninstall_git_hook_segment(
+        git_dir, "pre-commit", PRE_COMMIT_HOOK_BEGIN, PRE_COMMIT_HOOK_END
+    )
+    assert st == "missing"
+    assert pth == git_dir / "hooks" / "pre-commit"
+
+
+def test_uninstall_no_markers(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    git_dir = repo / ".git"
+    hook = git_dir / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho other\n", encoding="utf-8")
+    st, _ = _uninstall_git_hook_segment(
+        git_dir, "pre-commit", PRE_COMMIT_HOOK_BEGIN, PRE_COMMIT_HOOK_END
+    )
+    assert st == "no_spec_block"
+    assert hook.read_text(encoding="utf-8") == "#!/bin/sh\necho other\n"

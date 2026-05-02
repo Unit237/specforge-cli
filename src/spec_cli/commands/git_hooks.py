@@ -329,8 +329,7 @@ def run_git_hook_pre_push() -> int:
 @click.group(
     "git-hooks",
     help=(
-        "Commands invoked from git hooks (installed by `spec init`). "
-        "You normally do not run these by hand."
+        "Install, remove, or run git hook entrypoints (normally installed by `spec init`)."
     ),
 )
 def git_hooks_group() -> None:
@@ -390,6 +389,41 @@ def git_hooks_install_cmd() -> None:
     ok("Spec git hooks refreshed.")
     for label, st, pth in reports:
         pointer(label, f"{pth} ({st})")
+
+
+@git_hooks_group.command("uninstall")
+def git_hooks_uninstall_cmd() -> None:
+    """Remove Spec-managed blocks from ``.git/hooks`` (pre-commit, commit-msg, post-commit, pre-push)."""
+    from ..git import find_git_dir
+    from ..ui import dim, fatal, ok, pointer
+
+    from .init import GIT_HOOK_INSTALL_ROWS, _uninstall_git_hook_segment
+
+    root = Path.cwd().resolve()
+    try:
+        find_bundle_root(root)
+    except BundleNotFoundError:
+        fatal(f"No {MANIFEST_FILENAME} near {root}. Run `spec init` first.")
+        return
+
+    git_dir = find_git_dir(root)
+    if git_dir is None:
+        fatal("Could not find .git — not a git repository?")
+        return
+
+    reports: list[tuple[str, str, Path]] = []
+    try:
+        for label, fname, beg, end, _body, _hdr in GIT_HOOK_INSTALL_ROWS:
+            st, pth = _uninstall_git_hook_segment(git_dir, fname, beg, end)
+            reports.append((label, st, pth))
+    except OSError as e:
+        fatal(str(e))
+        return
+
+    ok("Spec git hooks removed (where present).")
+    for label, st, pth in reports:
+        pointer(label, f"{pth} ({st})")
+    dim("Re-enable with: spec git-hooks install")
 
 
 __all__ = [

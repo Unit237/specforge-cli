@@ -69,9 +69,11 @@ spec compile
 `spec add` / `spec unstage` for bundle paths, including **renames**),
 **commit-msg** (`spec git-hooks commit-msg` — runs capture and stages `.prompts`
 into the **same** commit), and **pre-push** (`spec push` when you `git push` a
-branch). Refresh with `spec git-hooks install`. Skip Spec upload on push with
-`SKIP_SPEC_PUSH=1`, or skip all hooks with `git push --no-verify`.
-Multi-bundle monorepos: set `SPEC_BUNDLE_ROOT` to the bundle directory.
+branch). Refresh with `spec git-hooks install`. Remove Spec hook blocks from
+`.git/hooks/` with `spec git-hooks uninstall` (non-Spec hook content in the same
+files is preserved). Skip Spec upload on push with `SKIP_SPEC_PUSH=1`, or skip
+all hooks with `git push --no-verify`. Multi-bundle monorepos: set
+`SPEC_BUNDLE_ROOT` to the bundle directory.
 
 Semantics (capture timing, disk vs. last `spec add`, auxiliary Markdown): see the
 Spec docs bundle (`docs/index.html`, Review section — Git hooks).
