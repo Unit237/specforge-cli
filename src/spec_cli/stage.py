@@ -94,6 +94,22 @@ def save_index(idx: Index) -> None:
         )
 
 
+def ensure_root_manifest_staged(idx: Index) -> None:
+    """Put ``spec.yaml`` back into *idx.staged* when it exists on disk but was cleared.
+
+    After a successful ``spec push``, uploaded paths move from *staged* to *pushed*.
+    Git pre-commit only runs ``spec add`` on paths in the current commit, so an
+    unchanged manifest never re-enters *staged* — yet every Cloud snapshot must
+    include it. Call this before :func:`assert_push_invariants` whenever there
+    is something to push.
+    """
+    path = idx.root / MANIFEST_FILENAME
+    if not path.is_file() or MANIFEST_FILENAME in idx.staged:
+        return
+    idx.staged[MANIFEST_FILENAME] = sha256(path.read_bytes())
+    save_index(idx)
+
+
 def record_bundle_path(root: Path) -> Index:
     """Remember the absolute path the bundle currently lives at.
 

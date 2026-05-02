@@ -7,9 +7,11 @@ from spec_cli.stage import (
     InvalidBundleError,
     assert_push_invariants,
     classify_working_tree,
+    ensure_root_manifest_staged,
     historical_bundle_paths,
     load_index,
     record_bundle_path,
+    save_index,
     sha256,
 )
 
@@ -64,6 +66,32 @@ def test_push_invariants_ok():
         Path("/tmp"),
         {"spec.yaml": "x", "docs/product.md": "y"},
     )
+
+
+def test_ensure_root_manifest_staged_after_successful_push_semantics(tmp_path: Path) -> None:
+    """Mirror real flow: push clears manifest from staged; next hook-only commit must still push."""
+    root = _make_bundle(tmp_path)
+    idx = load_index(root)
+    idx.staged["docs/product.md"] = sha256((root / "docs" / "product.md").read_bytes())
+    idx.pushed["spec.yaml"] = sha256((root / "spec.yaml").read_bytes())
+    save_index(idx)
+
+    ensure_root_manifest_staged(idx)
+
+    assert "spec.yaml" in idx.staged
+    assert idx.staged["spec.yaml"] == sha256((root / "spec.yaml").read_bytes())
+    assert_push_invariants(root, idx.staged)
+
+
+def test_ensure_root_manifest_staged_noop_when_already_present(tmp_path: Path) -> None:
+    root = _make_bundle(tmp_path)
+    idx = load_index(root)
+    h = sha256((root / "spec.yaml").read_bytes())
+    idx.staged["spec.yaml"] = h
+    idx.staged["docs/product.md"] = sha256((root / "docs" / "product.md").read_bytes())
+    save_index(idx)
+    ensure_root_manifest_staged(idx)
+    assert idx.staged["spec.yaml"] == h
 
 
 def test_push_invariants_rejects_md_under_prompts():

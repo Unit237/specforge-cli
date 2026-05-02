@@ -22,6 +22,7 @@ from ..git import read_git_context
 from ..stage import (
     InvalidBundleError,
     assert_push_invariants,
+    ensure_root_manifest_staged,
     load_index,
     save_index,
     sha256,
@@ -138,6 +139,8 @@ def push_cmd(
     if not idx.staged:
         dim("Nothing staged. Run `spec add <paths>` first.")
         return
+
+    ensure_root_manifest_staged(idx)
 
     try:
         assert_push_invariants(root, idx.staged)
