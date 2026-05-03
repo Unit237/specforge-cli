@@ -5,6 +5,8 @@ from __future__ import annotations
 import click
 
 from ..config import BundleNotFoundError, find_bundle_root, load_manifest
+from ..constants import PROMPTS_DIRNAME
+from ..git import read_git_context
 from ..stage import classify_working_tree, load_index, prune_stale_index_entries
 from ..ui import console, dim, fatal
 
@@ -36,6 +38,84 @@ _STATE_LABEL = {
     "ignored": "ignored (not bundle content)",
     "clean": "clean (matches last push)",
 }
+
+
+def _print_pending_prompt_captures(root) -> None:
+    """Surface "you have N new sessions to capture" before the working tree.
+
+    Quiet when there's nothing — same tone as the rest of `spec status`.
+    Imports the peek helper lazily so users without Claude Code or Cursor
+    on disk pay nothing for this on every status invocation.
+    """
+    try:
+        from .prompts import peek_pending_prompt_captures
+    except Exception:  # noqa: BLE001
+        return
+
+    try:
+        peek = peek_pending_prompt_captures(root)
+    except Exception:  # noqa: BLE001
+        return
+    if peek is None:
+        return
+
+    console.print()
+    console.print(
+        f"[sf.warn]Prompts pending capture[/] "
+        f"[sf.muted]· {peek.new_session_count} session(s), "
+        f"{peek.new_turn_count} new turn(s) since last capture[/]"
+    )
+    for sid, title in peek.examples:
+        short = sid[:12] + ("…" if len(sid) > 12 else "")
+        console.print(f"  [sf.muted]·[/] {short}  {title}")
+    if peek.new_session_count > len(peek.examples):
+        more = peek.new_session_count - len(peek.examples)
+        dim(f"  · …and {more} more")
+    dim(
+        f"  → on next `spec add .` or `git commit`, these write to "
+        f"{peek.dest_relpath}."
+    )
+
+
+def _print_unmerged_branch_prompts(root, *, current_branch: str) -> None:
+    """When on trunk, list branch-prompts files that haven't been rolled up.
+
+    Imports lazily and stays silent when (a) we're not on trunk or
+    (b) there's nothing to roll. The matching nudge points the user at
+    the post-merge hook (auto) or `spec prompts merge-branch` (manual).
+    """
+    try:
+        from .prompts import (
+            list_unmerged_branch_prompts,
+            trunk_branch_for,
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+    try:
+        trunk = trunk_branch_for(root)
+        if current_branch != trunk:
+            return
+        files = list_unmerged_branch_prompts(root, trunk=trunk)
+    except Exception:  # noqa: BLE001
+        return
+    if not files:
+        return
+
+    console.print()
+    console.print(
+        f"[sf.warn]Branch prompts to roll into {PROMPTS_DIRNAME}/{trunk}.prompts[/] "
+        f"[sf.muted]· {len(files)} file(s)[/]"
+    )
+    for p in files:
+        try:
+            console.print(f"  [sf.muted]·[/] {PROMPTS_DIRNAME}/{p.name}")
+        except Exception:  # noqa: BLE001
+            pass
+    dim(
+        "  → install the post-merge hook (run `spec git-hooks install`) "
+        "or roll manually with `spec prompts merge-branch`."
+    )
 
 
 @click.command("status")
@@ -73,10 +153,26 @@ def status_cmd(show_all: bool, show_ignored: bool) -> None:
     idx = load_index(root)
     prune_stale_index_entries(idx, manifest=manifest.data)
 
+    git_ctx = read_git_context(root)
+    branch_label = git_ctx.branch or ("(no git)" if not git_ctx.is_repo else "(detached)")
     console.print(
         f"[sf.label]bundle[/] [bold]{manifest.name or root.name}[/] "
-        f"[sf.muted]· {root}[/]"
+        f"[sf.muted]· {root}[/] "
+        f"[sf.muted]· branch [/][sf.point]{branch_label}[/]"
     )
+
+    # Surface fresh agent-store activity (Cursor / Claude Code) before the
+    # working-tree section. Mirrors the discovery half of `spec prompts
+    # capture` without writing — the user gets a heads-up that their
+    # `.prompts` is about to grow on the next `spec add` / `git commit`.
+    _print_pending_prompt_captures(root)
+
+    # When the user is on trunk, surface any non-trunk branch-prompts
+    # files that should be rolled into trunk's `<trunk>.prompts`. Either
+    # the post-merge hook didn't run (older bundle), or the branch was
+    # squash-merged in a way that didn't trigger it.
+    if git_ctx.is_repo and git_ctx.branch is not None:
+        _print_unmerged_branch_prompts(root, current_branch=git_ctx.branch)
 
     lines = classify_working_tree(root, idx, manifest=manifest.data)
     if not lines:

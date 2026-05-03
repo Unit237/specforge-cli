@@ -139,6 +139,23 @@ fi
 {PRE_PUSH_HOOK_END}
 """
 
+POST_MERGE_HOOK_BEGIN: str = "# >>> spec post-merge >>>"
+POST_MERGE_HOOK_END: str = "# <<< spec post-merge <<<"
+POST_MERGE_HOOK_BODY: str = f"""\
+{POST_MERGE_HOOK_BEGIN}
+# Auto-installed by `spec init`. Fires after `git merge` (and the merge
+# half of `git pull`) succeeds. When the user is on the trunk branch,
+# rolls every `prompts/<slug>.prompts` from a non-trunk branch into
+# `prompts/<trunk>.prompts` and `git add`s the result so the rollup
+# shows up in `git status` for a follow-up commit. Never blocks.
+if command -v spec >/dev/null 2>&1; then
+  spec git-hooks post-merge || true
+else
+  echo "spec: CLI not on PATH; skipping prompts rollup." >&2
+fi
+{POST_MERGE_HOOK_END}
+"""
+
 # Rows for `_install_git_hook_segment` — shared with `spec git-hooks install`.
 GIT_HOOK_INSTALL_ROWS: list[tuple[str, str, str, str, str, str]] = [
     (
@@ -172,6 +189,14 @@ GIT_HOOK_INSTALL_ROWS: list[tuple[str, str, str, str, str, str]] = [
         PRE_PUSH_HOOK_END,
         PRE_PUSH_HOOK_BODY,
         "#!/bin/sh\nset -e\n\n",
+    ),
+    (
+        "post-merge",
+        "post-merge",
+        POST_MERGE_HOOK_BEGIN,
+        POST_MERGE_HOOK_END,
+        POST_MERGE_HOOK_BODY,
+        "#!/bin/sh\n\n",
     ),
 ]
 

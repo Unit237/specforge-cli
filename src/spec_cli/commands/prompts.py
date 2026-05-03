@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -363,6 +364,316 @@ def _merge_into_branch_file(
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(body, encoding="utf-8")
     return len(changed_ids), frozenset(changed_ids)
+
+
+# ---------------------------------------------------------------------------
+# Trunk detection + branch-prompts rollup
+# ---------------------------------------------------------------------------
+
+
+def trunk_branch_for(bundle_root: Path) -> str:
+    """Return the bundle's trunk-branch name.
+
+    Checks ``cloud.default_branch`` in ``spec.yaml`` first (matches the
+    cloud server's logic in ``commands/push.py``); falls back to ``main``.
+    """
+    try:
+        from ..config import load_manifest
+
+        data = load_manifest(bundle_root).data
+    except (OSError, ValueError):
+        return "main"
+    cloud = data.get("cloud") or {}
+    branch = cloud.get("default_branch")
+    if isinstance(branch, str) and branch.strip():
+        return branch.strip()
+    return "main"
+
+
+def _looks_like_branch_prompts_file(p: Path) -> bool:
+    """True when ``p`` is a ``prompts/<slug>.prompts`` file authored for a branch.
+
+    Distinguishes real branch-prompts files (written by ``spec prompts
+    capture`` from a slugged branch name) from legacy / hand-authored
+    files like ``0000-starter.prompts`` or
+    ``2026-04-30T11-11-48Z.prompts``. The rule: read the file's
+    ``[commit].branch`` field, slug it, and compare to the actual
+    filename. Only matches roll up.
+
+    Files that don't parse, don't have a branch, or whose slug doesn't
+    match the filename are left alone — that's the safe default for
+    handwritten / migrated content.
+    """
+    if not p.is_file() or p.suffix.lower() != ".prompts":
+        return False
+    if p.parent.name != PROMPTS_DIRNAME:
+        return False
+    try:
+        pf = read_prompts_file(p)
+    except (PromptSchemaError, OSError):
+        return False
+    branch = (pf.commit.branch or "").strip() if pf.commit else ""
+    if not branch:
+        return False
+    return branch_prompts_filename(branch) == p.name
+
+
+def list_unmerged_branch_prompts(
+    bundle_root: Path, *, trunk: str | None = None
+) -> list[Path]:
+    """Return non-trunk branch-prompts files sitting at the prompts root.
+
+    Only includes files that actually look like branch captures
+    (filename matches ``branch_prompts_filename(file's [commit].branch)``);
+    legacy / hand-authored / starter ``.prompts`` files at the prompts
+    root are deliberately left alone.
+    """
+    trunk = trunk or trunk_branch_for(bundle_root)
+    trunk_filename = branch_prompts_filename(trunk)
+    proot = prompts_root(bundle_root)
+    if not proot.is_dir():
+        return []
+    out: list[Path] = []
+    for p in sorted(proot.glob("*.prompts")):
+        if p.name == trunk_filename:
+            continue
+        if not _looks_like_branch_prompts_file(p):
+            continue
+        out.append(p)
+    return out
+
+
+def rollup_branch_prompts_into_trunk(
+    bundle_root: Path,
+    *,
+    trunk: str | None = None,
+    now: datetime | None = None,
+) -> list[tuple[Path, int]]:
+    """Merge every non-trunk branch-prompts file into trunk's file.
+
+    For each branch file ``prompts/<slug>.prompts``:
+
+    1. Read it. Stamp ``merged_from`` (from the branch file's recorded
+       ``[commit].branch`` if available, else the slug) and
+       ``merged_at`` (now, UTC) on every session that doesn't already
+       carry merge provenance.
+    2. Append into trunk's ``prompts/<trunk>.prompts`` via the same
+       :func:`_merge_into_branch_file` dedupe used by capture.
+    3. Delete the branch file from disk.
+
+    Returns a list of ``(branch_file_path, sessions_rolled)`` for the
+    files that were touched. Empty list when nothing was rolled.
+    Failures on individual files are surfaced via :class:`OSError`/
+    :class:`PromptSchemaError`; callers (the hook entrypoint) should
+    catch and continue.
+    """
+    trunk = trunk or trunk_branch_for(bundle_root)
+    trunk_dest = prompts_root(bundle_root) / branch_prompts_filename(trunk)
+    branch_files = list_unmerged_branch_prompts(bundle_root, trunk=trunk)
+    if not branch_files:
+        return []
+
+    when = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    rolled: list[tuple[Path, int]] = []
+
+    for src in branch_files:
+        try:
+            pf = read_prompts_file(src)
+        except PromptSchemaError:
+            # Don't delete a corrupt file — leave it for the user to fix.
+            continue
+        if not pf.sessions:
+            # Empty branch file → safe to retire without rolling anything.
+            try:
+                src.unlink()
+            except OSError:
+                pass
+            continue
+
+        branch_label = (
+            (pf.commit.branch or "").strip()
+            if pf.commit and pf.commit.branch
+            else src.stem
+        )
+
+        for s in pf.sessions:
+            # Don't clobber a more authoritative cloud-stamped merge
+            # provenance if it was already there.
+            if s.merged_from is None:
+                s.merged_from = branch_label
+            if s.merged_at is None:
+                s.merged_at = when
+
+        author_name = pf.commit.author_name if pf.commit else "unknown"
+        author_email = pf.commit.author_email if pf.commit else "unknown@unknown"
+
+        try:
+            changed, _ids = _merge_into_branch_file(
+                trunk_dest,
+                branch=trunk,
+                author_name=author_name,
+                author_email=author_email,
+                new_sessions=list(pf.sessions),
+            )
+        except (OSError, PromptSchemaError):
+            continue
+
+        try:
+            src.unlink()
+        except OSError:
+            # We rolled successfully but couldn't delete — leave the
+            # branch file behind so the rollup is at least correct.
+            pass
+
+        rolled.append((src, changed))
+
+    return rolled
+
+
+def run_git_hook_post_merge_rollup(bundle_root: Path) -> None:
+    """``post-merge`` hook entrypoint: rolls branch-prompts into trunk.
+
+    No-op except when the user is currently on the trunk branch — that's
+    when ``git merge feature/foo`` (or ``git pull`` of a squash) has
+    just landed branch work into trunk. Any non-trunk
+    ``prompts/<slug>.prompts`` files in the worktree are merged into
+    ``prompts/<trunk>.prompts`` and removed; the resulting changes are
+    ``git add``-ed so they show up in ``git status`` for the user to
+    commit (one follow-up commit after the merge).
+    """
+    try:
+        git = read_git_context(bundle_root)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if not git.is_repo or not git.branch:
+        return
+    trunk = trunk_branch_for(bundle_root)
+    if git.branch != trunk:
+        return
+
+    try:
+        rolled = rollup_branch_prompts_into_trunk(bundle_root, trunk=trunk)
+    except (OSError, PromptSchemaError):
+        return
+    if not rolled:
+        return
+
+    # Stage the resulting tree changes so `git status` shows the rollup.
+    from ..git import repo_toplevel
+
+    top = repo_toplevel(bundle_root)
+    if top is None:
+        return
+
+    trunk_dest = prompts_root(bundle_root) / branch_prompts_filename(trunk)
+    paths_to_add: list[Path] = [trunk_dest]
+    for src, _ in rolled:
+        paths_to_add.append(src)  # `git add` records the deletion too
+    _git_stage_paths(top, paths_to_add)
+    _spec_stage_paths(bundle_root, [trunk_dest])
+
+    total = sum(n for _, n in rolled)
+    branch_names = ", ".join(p.stem for p, _ in rolled)
+    console.print(
+        f"[sf.label]prompts merge[/] [sf.muted]· "
+        f"{len(rolled)} branch file(s) rolled into "
+        f"{PROMPTS_DIRNAME}/{trunk_dest.name} "
+        f"({total} session snapshot(s)) — staged for commit[/]"
+    )
+    dim(f"  rolled: {branch_names}")
+
+
+@dataclass(frozen=True)
+class PendingCapturePeek:
+    """Read-only snapshot of "what would `spec prompts capture` write?".
+
+    Produced by :func:`peek_pending_prompt_captures` so callers like
+    ``spec status`` can surface pending agent activity without writing
+    a ``.prompts`` file. ``new_session_count`` is the number of distinct
+    session ids whose live transcript has more turns than the on-disk
+    snapshot; ``new_turn_count`` is the total number of *turns* across
+    those sessions. Examples are at most a handful of (id, title)
+    tuples for display.
+    """
+
+    new_session_count: int
+    new_turn_count: int
+    branch: str
+    dest_relpath: str
+    examples: tuple[tuple[str, str], ...]
+
+
+def peek_pending_prompt_captures(bundle_root: Path) -> PendingCapturePeek | None:
+    """Read-only mirror of :func:`run_auto_capture` discovery.
+
+    Returns ``None`` when there's nothing interesting to surface (no
+    agent stores installed, no new sessions, etc.) so callers can use
+    ``if peek := peek_pending_prompt_captures(root): ...``. Always
+    silent on errors — this is a "nice to have" surface, not a gate.
+    """
+    try:
+        record_bundle_path(bundle_root)
+        paths_for_lookup = historical_bundle_paths(bundle_root)
+
+        claude_store = claude_code_store_root()
+        cursor_store = cursor_workspace_storage_root()
+        claude_available = claude_store.exists()
+        cursor_available = cursor_store.exists()
+        if not claude_available and not cursor_available:
+            return None
+
+        git = read_git_context(bundle_root)
+        branch = git.branch or "detached"
+
+        already_counts = _existing_session_turn_counts(bundle_root)
+        new_sessions: list[Session] = []
+        new_turn_count = 0
+
+        if claude_available:
+            try:
+                for session in read_claude_code_sessions(
+                    paths_for_lookup, since=None, verbose=False
+                ):
+                    prev = already_counts.get(session.id, 0)
+                    if len(session.turns) <= prev:
+                        continue
+                    new_turn_count += len(session.turns) - prev
+                    already_counts[session.id] = len(session.turns)
+                    new_sessions.append(session)
+            except ClaudeCodeError:
+                return None
+
+        if cursor_available:
+            try:
+                for session in read_cursor_sessions(
+                    paths_for_lookup, since=None, verbose=False
+                ):
+                    prev = already_counts.get(session.id, 0)
+                    if len(session.turns) <= prev:
+                        continue
+                    new_turn_count += len(session.turns) - prev
+                    already_counts[session.id] = len(session.turns)
+                    new_sessions.append(session)
+            except CursorError:
+                return None
+
+        if not new_sessions:
+            return None
+
+        dest = _branch_prompts_path(bundle_root, branch)
+        examples = tuple(
+            (s.id, (s.title or "").strip() or "(untitled)")
+            for s in new_sessions[:3]
+        )
+        return PendingCapturePeek(
+            new_session_count=len(new_sessions),
+            new_turn_count=new_turn_count,
+            branch=branch,
+            dest_relpath=f"{PROMPTS_DIRNAME}/{dest.name}",
+            examples=examples,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def run_auto_capture(bundle_root: Path) -> Path | None:
@@ -1438,3 +1749,83 @@ def status_cmd() -> None:
         console.print(f"  [sf.warn]pending:  {counts.pending}[/]   (awaiting review)")
     else:
         console.print("  pending:  0")
+
+
+# ---------------------------------------------------------------------------
+# `prompts merge-branch` — manual rollup of branch prompts into trunk
+# ---------------------------------------------------------------------------
+
+
+@prompts_group.command("merge-branch")
+@click.option(
+    "--trunk",
+    default=None,
+    help=(
+        "Override the trunk branch name. Defaults to `cloud.default_branch` "
+        "from spec.yaml, or `main` if unset."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show which branch files would be rolled, don't write or delete.",
+)
+def merge_branch_cmd(trunk: str | None, dry_run: bool) -> None:
+    """Roll every non-trunk `prompts/<slug>.prompts` into trunk's file.
+
+    This is the same operation the post-merge git hook performs after
+    `git merge feature/foo` lands on trunk. Run it manually to back-fill
+    rollups when the hook wasn't installed at the time of the merge,
+    or to reconcile branch files that came in via a squash merge.
+
+    Each session inherits ``merged_from`` (the source branch label) and
+    ``merged_at`` (now, UTC) — same provenance shape Spec Cloud writes
+    when it promotes branch reviews into trunk's prompts file. The
+    branch files are removed once their sessions are folded in.
+    """
+    try:
+        root = find_bundle_root()
+    except BundleNotFoundError as e:
+        fatal(str(e))
+        return
+
+    resolved_trunk = (trunk or "").strip() or trunk_branch_for(root)
+    branch_files = list_unmerged_branch_prompts(root, trunk=resolved_trunk)
+    if not branch_files:
+        dim(
+            f"No non-trunk branch-prompts files at {PROMPTS_DIRNAME}/. "
+            f"Trunk is `{resolved_trunk}`."
+        )
+        return
+
+    if dry_run:
+        console.print(
+            f"[sf.label]prompts merge-branch (dry-run)[/] [sf.muted]· "
+            f"{len(branch_files)} file(s) would roll into "
+            f"{PROMPTS_DIRNAME}/{branch_prompts_filename(resolved_trunk)}[/]"
+        )
+        for src in branch_files:
+            try:
+                pf = read_prompts_file(src)
+                console.print(f"  · {src.name}  ({len(pf.sessions)} session(s))")
+            except PromptSchemaError as e:
+                console.print(f"  · {src.name}  [sf.reject](skipped: {e})[/]")
+        return
+
+    rolled = rollup_branch_prompts_into_trunk(root, trunk=resolved_trunk)
+    if not rolled:
+        dim("Nothing rolled (every branch file was empty or unreadable).")
+        return
+
+    total = sum(n for _, n in rolled)
+    ok(
+        f"Rolled {len(rolled)} branch file(s) into "
+        f"{PROMPTS_DIRNAME}/{branch_prompts_filename(resolved_trunk)} "
+        f"({total} session snapshot(s))."
+    )
+    for src, n in rolled:
+        pointer(
+            f"  {src.name}",
+            f"{n} session snapshot(s) merged",
+        )
+    dim("Branch files removed. `git add prompts/` and commit to record the rollup.")

@@ -300,6 +300,30 @@ def run_git_hook_commit_msg(commit_msg_file: str) -> None:
     )
 
 
+def run_git_hook_post_merge() -> None:
+    """Roll non-trunk branch-prompts files into trunk's file when on trunk.
+
+    Fires from the ``post-merge`` git hook after ``git merge`` (or the
+    merge half of ``git pull``) succeeds. No-op when:
+
+    * the bundle root can't be found,
+    * the user isn't currently on the bundle's trunk branch, or
+    * there are no non-trunk ``prompts/<slug>.prompts`` files to roll.
+
+    Delegates to :func:`run_git_hook_post_merge_rollup` in
+    :mod:`spec_cli.commands.prompts` for the actual file work.
+    """
+    top = repo_toplevel(Path.cwd())
+    if top is None:
+        return
+    bundle = resolve_bundle_root_for_git_hook(top)
+    if bundle is None:
+        return
+    from .prompts import run_git_hook_post_merge_rollup
+
+    run_git_hook_post_merge_rollup(bundle)
+
+
 def run_git_hook_pre_push() -> int:
     """Run ``spec push`` for the resolved bundle. ``SKIP_SPEC_PUSH=1`` skips."""
     if os.environ.get("SKIP_SPEC_PUSH", "").strip() == "1":
@@ -353,6 +377,12 @@ def git_hooks_commit_msg_cmd(commit_msg_file: str) -> None:
 def git_hooks_pre_push_cmd() -> None:
     """Run ``spec push`` before git completes a branch push (respects ``SKIP_SPEC_PUSH``)."""
     raise SystemExit(run_git_hook_pre_push())
+
+
+@git_hooks_group.command("post-merge")
+def git_hooks_post_merge_cmd() -> None:
+    """Roll non-trunk branch-prompts into trunk's file (run after ``git merge``)."""
+    run_git_hook_post_merge()
 
 
 @git_hooks_group.command("install")
@@ -431,6 +461,7 @@ __all__ = [
     "git_hooks_group",
     "resolve_bundle_root_for_git_hook",
     "run_git_hook_commit_msg",
+    "run_git_hook_post_merge",
     "run_git_hook_pre_commit",
     "run_git_hook_pre_push",
 ]
