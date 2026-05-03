@@ -192,3 +192,150 @@ def test_branch_paths(tmp_path: Path, branch: str, expected_basename: str) -> No
     bundle.mkdir()
     p = _branch_prompts_path(bundle, branch)
     assert p.name == f"{expected_basename}.prompts"
+
+
+def test_capture_replaces_session_when_turn_count_grew(tmp_path: Path) -> None:
+    """The headline capture bug from the user report: a long-running
+    Cursor / Claude Code session got captured once with N turns, the
+    user kept typing, and every subsequent commit-msg hook reported
+    "No new sessions to capture" — because the session id was already
+    in the file. The merge now replaces the entry whenever the live
+    transcript has grown, so the branch file always carries the freshest
+    snapshot of every conversation that touched the bundle.
+    """
+    bundle = tmp_path / "bundle"
+    (bundle / "prompts").mkdir(parents=True)
+    dest = _branch_prompts_path(bundle, "main")
+
+    short = Session(
+        id="ongoing",
+        source="cursor",
+        turns=[
+            Turn(role="user", text="first question"),
+            Turn(role="assistant", summary="first reply"),
+        ],
+    )
+    n1, ids1 = _merge_into_branch_file(
+        dest,
+        branch="main",
+        author_name="Alice",
+        author_email="alice@example.com",
+        new_sessions=[short],
+    )
+    assert n1 == 1
+    assert ids1 == frozenset({"ongoing"})
+
+    grown = Session(
+        id="ongoing",
+        source="cursor",
+        turns=[
+            Turn(role="user", text="first question"),
+            Turn(role="assistant", summary="first reply"),
+            Turn(role="user", text="follow-up"),
+            Turn(role="assistant", summary="second reply"),
+        ],
+    )
+    n2, ids2 = _merge_into_branch_file(
+        dest,
+        branch="main",
+        author_name="Alice",
+        author_email="alice@example.com",
+        new_sessions=[grown],
+    )
+    assert n2 == 1
+    assert ids2 == frozenset({"ongoing"})
+
+    pf = read_prompts_file(dest)
+    assert len(pf.sessions) == 1
+    assert len(pf.sessions[0].turns) == 4
+
+
+def test_capture_keeps_existing_session_when_turn_count_shrank(
+    tmp_path: Path,
+) -> None:
+    """Defensive: a re-ordered or partial source read shouldn't *truncate*
+    the captured snapshot. We only replace when the new transcript has
+    strictly more turns than the captured one."""
+    bundle = tmp_path / "bundle"
+    (bundle / "prompts").mkdir(parents=True)
+    dest = _branch_prompts_path(bundle, "main")
+
+    full = Session(
+        id="ongoing",
+        source="cursor",
+        turns=[
+            Turn(role="user", text="q1"),
+            Turn(role="assistant", summary="r1"),
+            Turn(role="user", text="q2"),
+        ],
+    )
+    _merge_into_branch_file(
+        dest,
+        branch="main",
+        author_name="Alice",
+        author_email="alice@example.com",
+        new_sessions=[full],
+    )
+    short = Session(
+        id="ongoing",
+        source="cursor",
+        turns=[Turn(role="user", text="q1")],
+    )
+    n, ids = _merge_into_branch_file(
+        dest,
+        branch="main",
+        author_name="Alice",
+        author_email="alice@example.com",
+        new_sessions=[short],
+    )
+    assert n == 0
+    assert ids == frozenset()
+    pf = read_prompts_file(dest)
+    assert len(pf.sessions[0].turns) == 3
+
+
+def test_capture_appends_alongside_replacement(tmp_path: Path) -> None:
+    """Mixed batch: one growing session + one brand-new session in the
+    same merge. Both land in the file in one write."""
+    bundle = tmp_path / "bundle"
+    (bundle / "prompts").mkdir(parents=True)
+    dest = _branch_prompts_path(bundle, "main")
+
+    seed = Session(
+        id="growing",
+        source="cursor",
+        turns=[Turn(role="user", text="q1")],
+    )
+    _merge_into_branch_file(
+        dest,
+        branch="main",
+        author_name="Alice",
+        author_email="alice@example.com",
+        new_sessions=[seed],
+    )
+
+    grown = Session(
+        id="growing",
+        source="cursor",
+        turns=[Turn(role="user", text="q1"), Turn(role="user", text="q2")],
+    )
+    fresh = Session(
+        id="brand-new",
+        source="cursor",
+        turns=[Turn(role="user", text="hello")],
+    )
+    n, ids = _merge_into_branch_file(
+        dest,
+        branch="main",
+        author_name="Alice",
+        author_email="alice@example.com",
+        new_sessions=[grown, fresh],
+    )
+    assert n == 2
+    assert ids == frozenset({"growing", "brand-new"})
+
+    pf = read_prompts_file(dest)
+    assert {s.id for s in pf.sessions} == {"growing", "brand-new"}
+    by_id = {s.id: s for s in pf.sessions}
+    assert len(by_id["growing"].turns) == 2
+    assert len(by_id["brand-new"].turns) == 1

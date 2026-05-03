@@ -10,9 +10,11 @@ from spec_cli.stage import (
     ensure_root_manifest_staged,
     historical_bundle_paths,
     load_index,
+    prune_stale_index_entries,
     record_bundle_path,
     save_index,
     sha256,
+    walk_spec_files,
 )
 
 
@@ -218,3 +220,101 @@ def test_load_index_tolerates_missing_bundle_paths_field(tmp_path):
     )
     idx = load_index(root)
     assert idx.bundle_paths == []
+
+
+# ---------------------------------------------------------------------------
+# Working-tree walk: skip dependency / build dirs and obvious cruft so a
+# brand-new `spec add .` doesn't sweep up `node_modules/.../README.md`.
+# ---------------------------------------------------------------------------
+
+
+def test_walk_spec_files_skips_node_modules(tmp_path: Path) -> None:
+    root = _make_bundle(tmp_path)
+    nm = root / "frontend" / "node_modules" / "react"
+    nm.mkdir(parents=True)
+    (nm / "README.md").write_text("# react\n")
+    found = {p.name for p in walk_spec_files(root)}
+    assert "README.md" not in found  # node_modules/.../README.md not yielded
+    assert "spec.yaml" in found
+    assert "product.md" in found
+
+
+def test_walk_spec_files_skips_build_dirs(tmp_path: Path) -> None:
+    """``dist/``, ``__pycache__/``, ``.venv/`` etc. are dependency / build
+    output. None of them should ever be yielded by the bundle walker —
+    even when the file inside has a spec-eligible extension."""
+    root = _make_bundle(tmp_path)
+    for skip in ("dist", "__pycache__", ".venv", "build", "target", "vendor"):
+        d = root / skip
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "README.md").write_text("# noise\n")
+        (d / "x.prompts").write_text(
+            'schema = "spec.prompts/v0.1"\n[commit]\nbranch = "main"\n'
+            'author_name = "t"\nauthor_email = "t@example.com"\n'
+            '[[sessions]]\nid = "x"\nsource = "manual"\n'
+            '[[sessions.turns]]\nrole = "user"\ntext = "hi"\n'
+        )
+    rels = {str(p.relative_to(root)) for p in walk_spec_files(root)}
+    for skip in ("dist", "__pycache__", ".venv", "build", "target", "vendor"):
+        assert not any(r.startswith(f"{skip}/") for r in rels), rels
+
+
+# ---------------------------------------------------------------------------
+# `prune_stale_index_entries` — heals indexes that older buggy walks
+# poisoned (e.g. a `frontend/node_modules/.../README.md` left behind in
+# `pushed`) so `spec status` and `spec add .` show clean output.
+# ---------------------------------------------------------------------------
+
+
+def test_prune_drops_node_modules_pushed_entries(tmp_path: Path) -> None:
+    root = _make_bundle(tmp_path)
+    idx = load_index(root)
+    idx.pushed["frontend/node_modules/@babel/core/README.md"] = "deadbeef"
+    idx.pushed["frontend/node_modules/react/README.md"] = "feedface"
+    idx.pushed["docs/product.md"] = sha256(
+        (root / "docs" / "product.md").read_bytes()
+    )
+    save_index(idx)
+
+    removed = prune_stale_index_entries(idx)
+    assert removed == 2
+    assert "docs/product.md" in idx.pushed
+    assert not any("node_modules" in k for k in idx.pushed)
+
+
+def test_prune_drops_pushed_entries_for_deleted_files(tmp_path: Path) -> None:
+    """A file that the user deleted from disk should leave ``pushed``
+    behind on the next sweep — keeps ``spec status`` honest about what's
+    actually in the working tree."""
+    root = _make_bundle(tmp_path)
+    idx = load_index(root)
+    idx.pushed["docs/gone.md"] = "deadbeef"
+    idx.pushed["docs/product.md"] = sha256(
+        (root / "docs" / "product.md").read_bytes()
+    )
+    save_index(idx)
+
+    removed = prune_stale_index_entries(idx)
+    assert removed == 1
+    assert "docs/gone.md" not in idx.pushed
+    assert "docs/product.md" in idx.pushed
+
+
+def test_prune_drops_non_spec_extensions(tmp_path: Path) -> None:
+    """An index that somehow ended up tracking a ``.tsx`` or ``.html``
+    file (older CLI bug, hand-edit) gets cleaned up — those extensions
+    are never bundle content."""
+    root = _make_bundle(tmp_path)
+    idx = load_index(root)
+    idx.pushed["frontend/src/App.tsx"] = "x"
+    idx.pushed["docs/index.html"] = "y"
+    idx.staged["frontend/src/App.tsx"] = "x"
+    idx.pushed["docs/product.md"] = sha256(
+        (root / "docs" / "product.md").read_bytes()
+    )
+    save_index(idx)
+
+    removed = prune_stale_index_entries(idx)
+    assert removed == 3
+    assert idx.staged == {}
+    assert "docs/product.md" in idx.pushed

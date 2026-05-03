@@ -24,6 +24,7 @@ from ..stage import (
     assert_push_invariants,
     ensure_root_manifest_staged,
     load_index,
+    prune_stale_index_entries,
     save_index,
     sha256,
 )
@@ -105,6 +106,12 @@ def push_cmd(
 
     manifest = load_manifest(root)
     idx = load_index(root)
+
+    # Same lazy hygiene as `spec add`: throw out tracked entries that
+    # the current resolver would never accept (legacy `node_modules`
+    # cruft, files we've since deleted from disk). Cleans up the local
+    # index without touching the server copy.
+    prune_stale_index_entries(idx, manifest=manifest.data)
 
     creds_for_handle = load_credentials()
     default_handle = creds_for_handle.user_handle if creds_for_handle else None

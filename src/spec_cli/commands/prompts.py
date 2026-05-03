@@ -76,7 +76,14 @@ from ..sources import (
     read_cursor_sessions,
 )
 from ..sources.claude_code import claude_code_store_root
-from ..stage import historical_bundle_paths, record_bundle_path, rel_posix
+from ..stage import (
+    historical_bundle_paths,
+    load_index,
+    record_bundle_path,
+    rel_posix,
+    save_index,
+    sha256,
+)
 from ..ui import console, dim, fatal, info, ok, pointer, reject, warn
 
 
@@ -103,6 +110,49 @@ def _git_stage_paths(repo_top: Path, paths: list[Path]) -> None:
             text=True,
             timeout=120,
         )
+
+
+def _spec_stage_paths(bundle_root: Path, paths: list[Path]) -> None:
+    """Mirror :func:`_git_stage_paths` for the spec-side index.
+
+    The commit-msg hook is the only place that ships brand-new bytes
+    *after* the pre-commit hook's git→spec mirroring has already run.
+    Without this, a freshly captured ``prompts/<branch>.prompts`` lands
+    in git's commit but never enters ``idx.staged``, so the matching
+    ``spec push`` (pre-push hook) silently skips it. The user then
+    sees git carrying the .prompts forward while Cloud is missing the
+    very turns the commit was meant to capture — exactly the
+    "nothing staged" / "no new sessions" shape the user reported.
+
+    We hash and record directly instead of shelling out to ``spec add``
+    because we already have the file open and the bundle root in hand.
+    """
+    if not paths:
+        return
+    idx = load_index(bundle_root)
+    abs_root = bundle_root.resolve()
+    dirty = False
+    for p in paths:
+        try:
+            abs_p = p.resolve()
+        except OSError:
+            continue
+        if not abs_p.is_file():
+            continue
+        try:
+            rel = rel_posix(abs_root, abs_p)
+        except ValueError:
+            continue
+        try:
+            digest = sha256(abs_p.read_bytes())
+        except OSError:
+            continue
+        if idx.staged.get(rel) == digest:
+            continue
+        idx.staged[rel] = digest
+        dirty = True
+    if dirty:
+        save_index(idx)
 
 
 def _patch_branch_file_commit_shas(
@@ -154,15 +204,26 @@ def _parse_since(raw: str | None) -> datetime | None:
         ) from e
 
 
-def _existing_session_ids(bundle_root: Path) -> set[str]:
-    """Scan every `.prompts` file across every tier and return the set of
-    session ids already captured.
+def _existing_session_turn_counts(bundle_root: Path) -> dict[str, int]:
+    """Per session id, the largest turn count we've already captured.
 
-    `prompts capture` is idempotent — once a session id shows up in any
-    `.prompts` file (captured, curated, pending, or legacy-root), we never
-    emit it again. This is what makes `capture` safe to run on a cron.
+    `prompts capture` is idempotent at the *snapshot* level: once a
+    session has been written to a `.prompts` file with N turns, the
+    next capture only considers it "new" if the live conversation has
+    grown past N turns. This is what lets a long-running Cursor or
+    Claude Code session that spans many commits get re-snapshotted
+    each time the user appends to it (instead of being permanently
+    frozen at its first-ever capture, which is what the old set-of-ids
+    behavior caused — the headline bug behind the user-facing
+    "No new sessions to capture" complaint when they were clearly
+    still typing).
+
+    Crawls every `.prompts` tier (captured / curated / pending /
+    legacy-root) so a session promoted from `captured/` to `curated/`
+    isn't re-discovered on the next capture; we only re-emit when
+    there's something new to say.
     """
-    seen: set[str] = set()
+    counts: dict[str, int] = {}
     for tp in iter_all_prompts(bundle_root):
         try:
             pf = read_prompts_file(tp.abs_path)
@@ -171,8 +232,10 @@ def _existing_session_ids(bundle_root: Path) -> set[str]:
             # gets that error from `prompts validate`.
             continue
         for s in pf.sessions:
-            seen.add(s.id)
-    return seen
+            n = len(s.turns)
+            if n > counts.get(s.id, 0):
+                counts[s.id] = n
+    return counts
 
 
 def _branch_prompts_path(bundle_root: Path, branch: str) -> Path:
@@ -228,13 +291,24 @@ def _merge_into_branch_file(
     author_email: str,
     new_sessions: list[Session],
 ) -> tuple[int, frozenset[str]]:
-    """Append `new_sessions` to the branch file at `dest`.
+    """Merge ``new_sessions`` into the branch file at ``dest``.
 
-    Idempotent on session id: a session already present in the file
-    is dropped. Re-renders the whole file deterministically so two
-    captures with the same input produce byte-identical output.
+    Two-tier dedup, mirroring how git records snapshots:
 
-    Returns ``(added_count, ids_appended)``.
+    * **Brand-new ids** are appended to the existing session list, so
+      independent conversations queue up in capture order.
+    * **Existing ids** with *more turns* than the captured snapshot
+      replace the prior entry in place — the branch file keeps a
+      single, freshest snapshot per conversation, with every previously
+      captured turn preserved (Cursor / Claude Code adapters always
+      emit the full transcript). Same-or-fewer turns are a no-op,
+      which is what keeps re-running ``capture`` on a quiet branch
+      cheap.
+
+    Returns ``(changed_count, ids_changed)`` where *changed_count* is
+    appends + replacements and *ids_changed* is exactly the session ids
+    we wrote to disk in this merge — used downstream for stamping the
+    pending commit SHA back onto only the rows we touched.
     """
     existing: PromptsFile | None
     if dest.exists():
@@ -255,32 +329,40 @@ def _merge_into_branch_file(
             sessions=list(new_sessions),
             edits=[],
         )
-        added = len(new_sessions)
-    else:
-        seen_ids = {s.id for s in existing.sessions}
-        appended: list[Session] = []
-        for s in new_sessions:
-            if s.id in seen_ids:
-                continue
-            appended.append(s)
-            seen_ids.add(s.id)
-        merged = PromptsFile(
-            commit=existing.commit,
-            sessions=existing.sessions + appended,
-            edits=existing.edits,
-        )
-        added = len(appended)
-        appended_ids = frozenset(s.id for s in appended)
+        body = render_prompts_file(merged)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(body, encoding="utf-8")
+        return len(new_sessions), frozenset(s.id for s in new_sessions)
 
-    if added == 0:
+    sessions_out = list(existing.sessions)
+    index_by_id = {s.id: i for i, s in enumerate(sessions_out)}
+    changed_ids: set[str] = set()
+
+    for s in new_sessions:
+        prev_idx = index_by_id.get(s.id)
+        if prev_idx is None:
+            index_by_id[s.id] = len(sessions_out)
+            sessions_out.append(s)
+            changed_ids.add(s.id)
+            continue
+        prev = sessions_out[prev_idx]
+        if len(s.turns) > len(prev.turns):
+            sessions_out[prev_idx] = s
+            changed_ids.add(s.id)
+        # else: stale or equal snapshot — keep the existing entry.
+
+    if not changed_ids:
         return 0, frozenset()
 
+    merged = PromptsFile(
+        commit=existing.commit,
+        sessions=sessions_out,
+        edits=existing.edits,
+    )
     body = render_prompts_file(merged)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(body, encoding="utf-8")
-    if existing is None:
-        appended_ids = frozenset(s.id for s in new_sessions)
-    return added, appended_ids
+    return len(changed_ids), frozenset(changed_ids)
 
 
 def run_auto_capture(bundle_root: Path) -> Path | None:
@@ -319,7 +401,7 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
     author_email = git.author_email or "unknown@unknown"
     branch = git.branch or "detached"
 
-    already = _existing_session_ids(bundle_root)
+    already_counts = _existing_session_turn_counts(bundle_root)
     discovered: list[Session] = []
 
     if claude_available:
@@ -327,9 +409,9 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
             for session in read_claude_code_sessions(
                 paths_for_lookup, since=None, verbose=True
             ):
-                if session.id in already:
+                if not _session_has_new_turns(session, already_counts):
                     continue
-                already.add(session.id)
+                already_counts[session.id] = len(session.turns)
                 discovered.append(session)
         except ClaudeCodeError:
             return None
@@ -339,9 +421,9 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
             for session in read_cursor_sessions(
                 paths_for_lookup, since=None, verbose=True
             ):
-                if session.id in already:
+                if not _session_has_new_turns(session, already_counts):
                     continue
-                already.add(session.id)
+                already_counts[session.id] = len(session.turns)
                 discovered.append(session)
         except CursorError:
             return None
@@ -356,7 +438,7 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
 
     dest = _branch_prompts_path(bundle_root, branch)
     try:
-        added, _appended_ids = _merge_into_branch_file(
+        changed, _changed_ids = _merge_into_branch_file(
             dest,
             branch=branch,
             author_name=author_name,
@@ -366,12 +448,26 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
     except PromptSchemaError:
         return None
 
-    if added == 0:
+    if changed == 0:
         return None
 
     rel_dest = f"{PROMPTS_DIRNAME}/{dest.name}"
-    info(f"captured {added} new session(s) → {rel_dest}")
+    info(f"captured {changed} session snapshot(s) → {rel_dest}")
     return dest
+
+
+def _session_has_new_turns(
+    session: Session, already_counts: dict[str, int]
+) -> bool:
+    """Predicate: does ``session`` have at least one turn we haven't
+    already captured for this session id?
+
+    Centralised so the auto-capture, the commit-msg hook capture, and
+    the explicit ``spec prompts capture`` command all agree on the
+    rule. Treats absent ids as "everything is new" so first-time
+    captures for a freshly-created composer go through unchanged.
+    """
+    return len(session.turns) > already_counts.get(session.id, 0)
 
 
 def run_capture_for_commit_msg_hook(
@@ -407,7 +503,7 @@ def run_capture_for_commit_msg_hook(
         branch = git.branch or "detached"
         warn_non_git = not git.is_repo
 
-        already_captured = _existing_session_ids(bundle_root)
+        already_counts = _existing_session_turn_counts(bundle_root)
         discovered: list[Session] = []
 
         if claude_available:
@@ -415,9 +511,9 @@ def run_capture_for_commit_msg_hook(
                 for session in read_claude_code_sessions(
                     paths_for_lookup, since=None, verbose=True
                 ):
-                    if session.id in already_captured:
+                    if not _session_has_new_turns(session, already_counts):
                         continue
-                    already_captured.add(session.id)
+                    already_counts[session.id] = len(session.turns)
                     discovered.append(session)
             except ClaudeCodeError:
                 return
@@ -427,9 +523,9 @@ def run_capture_for_commit_msg_hook(
                 for session in read_cursor_sessions(
                     paths_for_lookup, since=None, verbose=True
                 ):
-                    if session.id in already_captured:
+                    if not _session_has_new_turns(session, already_counts):
                         continue
-                    already_captured.add(session.id)
+                    already_counts[session.id] = len(session.turns)
                     discovered.append(session)
             except CursorError:
                 return
@@ -447,7 +543,7 @@ def run_capture_for_commit_msg_hook(
 
         dest = _branch_prompts_path(bundle_root, branch)
         try:
-            added, appended_ids = _merge_into_branch_file(
+            changed, appended_ids = _merge_into_branch_file(
                 dest,
                 branch=branch,
                 author_name=author_name,
@@ -457,14 +553,14 @@ def run_capture_for_commit_msg_hook(
         except PromptSchemaError:
             return
 
-        if added == 0:
+        if changed == 0:
             dim("No new sessions to capture (already present in branch file).")
             return
 
         rel_dest = f"{PROMPTS_DIRNAME}/{dest.name}"
         console.print(
             f"[sf.label]prompts capture[/] [sf.muted]· "
-            f"{added} new session(s) → {rel_dest}[/]"
+            f"{changed} session snapshot(s) → {rel_dest}[/]"
         )
         if warn_non_git:
             dim(
@@ -474,6 +570,7 @@ def run_capture_for_commit_msg_hook(
             )
 
         _git_stage_paths(repo_top, [dest])
+        _spec_stage_paths(bundle_root, [dest])
 
         predicted: str | None = None
         if not skip_predict:
@@ -486,6 +583,7 @@ def run_capture_for_commit_msg_hook(
                 commit_sha=predicted,
             ):
                 _git_stage_paths(repo_top, [dest])
+                _spec_stage_paths(bundle_root, [dest])
 
         pointer("wrote", str(dest.relative_to(bundle_root)))
         dim(
@@ -649,7 +747,7 @@ def capture_cmd(
     author_email = git.author_email or "unknown@unknown"
     branch = git.branch or "detached"
 
-    already_captured = _existing_session_ids(root)
+    already_counts = _existing_session_turn_counts(root)
 
     discovered = []
     if claude_available:
@@ -657,9 +755,9 @@ def capture_cmd(
             for session in read_claude_code_sessions(
                 paths_for_lookup, since=since_dt, verbose=capture_text
             ):
-                if session.id in already_captured:
+                if not _session_has_new_turns(session, already_counts):
                     continue
-                already_captured.add(session.id)
+                already_counts[session.id] = len(session.turns)
                 discovered.append(session)
         except ClaudeCodeError as e:
             fatal(str(e))
@@ -670,9 +768,9 @@ def capture_cmd(
             for session in read_cursor_sessions(
                 paths_for_lookup, since=since_dt, verbose=capture_text
             ):
-                if session.id in already_captured:
+                if not _session_has_new_turns(session, already_counts):
                     continue
-                already_captured.add(session.id)
+                already_counts[session.id] = len(session.turns)
                 discovered.append(session)
         except CursorError as e:
             fatal(str(e))
@@ -747,7 +845,7 @@ def capture_cmd(
         return
 
     try:
-        added, _appended_ids = _merge_into_branch_file(
+        changed, _changed_ids = _merge_into_branch_file(
             dest,
             branch=branch,
             author_name=author_name,
@@ -758,15 +856,16 @@ def capture_cmd(
         fatal(f"render failed: {e}")
         return
 
-    if added == 0:
-        # Every discovered session was already in the file (idempotent
-        # re-run). Stay quiet — no diff for the user to look at.
+    if changed == 0:
+        # Every discovered session was already in the file at the same
+        # turn count (idempotent re-run). Stay quiet — no diff for the
+        # user to look at.
         dim("No new sessions to capture (already present in branch file).")
         return
 
     console.print(
         f"[sf.label]prompts capture[/] [sf.muted]· "
-        f"{added} new session(s) → {rel_dest}[/]"
+        f"{changed} session snapshot(s) → {rel_dest}[/]"
     )
     if warn_non_git:
         dim(

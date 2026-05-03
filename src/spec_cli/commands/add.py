@@ -13,7 +13,14 @@ from ..constants import (
     is_spec_file,
 )
 from ..frontmatter import read_frontmatter
-from ..stage import load_index, rel_posix, save_index, sha256, walk_spec_files
+from ..stage import (
+    load_index,
+    prune_stale_index_entries,
+    rel_posix,
+    save_index,
+    sha256,
+    walk_spec_files,
+)
 from ..ui import dim, fatal, info, ok, reject
 
 
@@ -66,6 +73,13 @@ def add_cmd(paths: tuple[str, ...], no_capture: bool, verbose: bool) -> None:
 
     manifest = load_manifest(root)
     idx = load_index(root)
+
+    # Lazy index hygiene: drop entries that older buggy walks (or a
+    # file deletion in the meantime) left in ``idx.pushed``/
+    # ``idx.staged``. This keeps ``spec status`` honest and stops
+    # ``spec add .`` from re-staging files we've since decided are
+    # not bundle content (e.g. ``node_modules/.../README.md``).
+    prune_stale_index_entries(idx, manifest=manifest.data)
 
     walking_a_dir = any(Path(p).is_dir() for p in paths)
     if walking_a_dir and not no_capture:
@@ -138,8 +152,20 @@ def add_cmd(paths: tuple[str, ...], no_capture: bool, verbose: bool) -> None:
         seen.add(rel)
         content = t.read_bytes()
         h = sha256(content)
-        prev = idx.staged.get(rel)
-        if prev == h:
+
+        # "Unchanged" means: this content has already been delivered to
+        # spec — either it's queued in `staged` at this exact hash, or
+        # the last successful push uploaded these bytes and the file
+        # hasn't been touched since. Mirrors `git add` semantics: a
+        # clean file run through `git add` is a no-op, and the user
+        # doesn't see ten lines of "✓ staged" for files they didn't
+        # change. Without the `pushed` arm, a fresh `spec add .` after
+        # a successful push would re-stage the entire bundle (because
+        # `staged` is wiped on push) and look exactly like the bug we
+        # were just asked to fix.
+        prev_staged = idx.staged.get(rel)
+        prev_pushed = idx.pushed.get(rel)
+        if prev_staged == h or (prev_staged is None and prev_pushed == h):
             unchanged.append(rel)
             continue
         idx.staged[rel] = h

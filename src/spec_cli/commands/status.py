@@ -5,7 +5,7 @@ from __future__ import annotations
 import click
 
 from ..config import BundleNotFoundError, find_bundle_root, load_manifest
-from ..stage import classify_working_tree, load_index
+from ..stage import classify_working_tree, load_index, prune_stale_index_entries
 from ..ui import console, dim, fatal
 
 
@@ -71,6 +71,7 @@ def status_cmd(show_all: bool, show_ignored: bool) -> None:
 
     manifest = load_manifest(root)
     idx = load_index(root)
+    prune_stale_index_entries(idx, manifest=manifest.data)
 
     console.print(
         f"[sf.label]bundle[/] [bold]{manifest.name or root.name}[/] "

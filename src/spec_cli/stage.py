@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Iterable
@@ -27,6 +29,42 @@ from .constants import (
     is_spec_file,
 )
 from .frontmatter import read_frontmatter
+
+
+# Directory names we never recurse into during the working-tree walk,
+# even when ``.gitignore`` is silent. The unifying property: dependency
+# caches and build outputs that no sane bundle ever wants staged.
+# Mirrors the well-known set git itself special-cases under
+# ``core.excludesFile`` plus the per-language conventions every modern
+# project ships with. Dotfile dirs (``.git``, ``.spec``, …) are skipped
+# by a separate rule and don't need to repeat here.
+ALWAYS_SKIP_DIRNAMES: frozenset[str] = frozenset(
+    {
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "env",
+        "dist",
+        "build",
+        "out",
+        "target",
+        "vendor",
+        ".next",
+        ".nuxt",
+        ".cache",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        "site-packages",
+        "coverage",
+        ".coverage",
+        ".gradle",
+        ".idea",
+        ".vscode",
+    }
+)
 
 
 INDEX_DIRNAME = ".spec"
@@ -110,6 +148,77 @@ def ensure_root_manifest_staged(idx: Index) -> None:
     save_index(idx)
 
 
+def prune_stale_index_entries(idx: Index, *, manifest: dict | None = None) -> int:
+    """Drop ``idx.staged`` / ``idx.pushed`` entries that no longer belong.
+
+    Two failure modes the local index can drift into over time:
+
+      * Files that an older CLI accidentally swept up (e.g. before this
+        version started skipping ``node_modules/``) sit in ``pushed``
+        forever, polluting ``spec status`` and tempting fresh
+        ``spec add .`` invocations to re-stage them.
+      * Files that have been deleted from the working tree but never
+        explicitly removed from spec — ``pushed`` keeps the old hash
+        even though the file is gone.
+
+    For each tracked path we check, in order:
+
+      1. Path skipped by the directory walker (``node_modules`` &
+         friends, dotfile dirs)? Drop it.
+      2. Wrong extension for a bundle (per ``is_spec_file``)? Drop it.
+      3. ``.md`` / ``.markdown`` that fails the bundle resolver under
+         the *current* manifest? Drop it.
+      4. File no longer present on disk? Drop it from ``pushed`` only —
+         a deleted-but-staged path is still meaningful (a subsequent
+         push will fail loudly), but ``pushed`` should reflect what's
+         live.
+
+    The server keeps whatever was uploaded; this is a *local* tidy-up.
+    Returns the number of entries removed across both maps so callers
+    can decide whether to log anything.
+    """
+    removed = 0
+    root = idx.root.resolve()
+
+    def _drop(rel: str) -> bool:
+        parts = tuple(PurePosixPath(rel).parts)
+        if _path_is_skipped(parts):
+            return True
+        if not is_spec_file(rel):
+            return True
+        suffix = PurePosixPath(rel).suffix.lower()
+        if suffix in (".md", ".markdown"):
+            abs_path = root / rel
+            fm = read_frontmatter(abs_path) if abs_path.is_file() else None
+            if not is_bundle_path(rel, manifest=manifest, frontmatter=fm):
+                return True
+        return False
+
+    for rel in list(idx.staged):
+        if _drop(rel):
+            idx.staged.pop(rel, None)
+            removed += 1
+
+    for rel in list(idx.pushed):
+        if _drop(rel):
+            idx.pushed.pop(rel, None)
+            removed += 1
+            continue
+        # Drop pushed entries whose file is gone — keeps the index in
+        # sync with the working tree without touching the server copy.
+        # Staged entries point at content the user explicitly chose to
+        # ship, so a missing-file there stays put and surfaces at push
+        # time instead.
+        abs_path = root / rel
+        if not abs_path.is_file():
+            idx.pushed.pop(rel, None)
+            removed += 1
+
+    if removed:
+        save_index(idx)
+    return removed
+
+
 def record_bundle_path(root: Path) -> Index:
     """Remember the absolute path the bundle currently lives at.
 
@@ -168,12 +277,125 @@ def historical_bundle_paths(root: Path) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 
+def _path_is_skipped(parts: tuple[str, ...]) -> bool:
+    """True if any directory segment in ``parts[:-1]`` is dotfile-prefixed
+    or matches the always-skip list (``node_modules``, ``dist``, …).
+
+    The trailing element (``parts[-1]``) is the file's own name, so a
+    file *named* ``node_modules`` (rare but legal) would still be
+    considered. We only filter on directory ancestry.
+    """
+    for part in parts[:-1]:
+        if not part:
+            continue
+        if part.startswith("."):
+            return True
+        if part in ALWAYS_SKIP_DIRNAMES:
+            return True
+    return False
+
+
+def _git_ls_tracked_and_untracked(root: Path) -> list[Path] | None:
+    """Use ``git ls-files`` to enumerate the working tree honoring
+    ``.gitignore``.
+
+    Returns the list of every file git considers tracked or untracked-
+    but-not-ignored, anchored at ``root``. Returns ``None`` when ``root``
+    is not inside a git worktree, when ``git`` is missing, or when the
+    subprocess fails — the caller falls back to filesystem walking.
+
+    We pass ``--cached --others --exclude-standard`` to mirror exactly
+    what ``git status`` would surface: tracked files (so ``spec add .``
+    re-stages real edits) + untracked-not-ignored files (so freshly
+    written ``docs/foo.md`` is picked up immediately) − ignored files
+    (so ``node_modules/`` and ``dist/`` stay out). ``-z`` keeps NUL
+    separators so paths with newlines never get mis-split.
+    """
+    if shutil.which("git") is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    raw = result.stdout or b""
+    if not raw:
+        return []
+    out: list[Path] = []
+    seen: set[str] = set()
+    for chunk in raw.split(b"\0"):
+        if not chunk:
+            continue
+        try:
+            rel = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        rel = rel.replace("\\", "/").strip()
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        p = (root / rel).resolve()
+        if not p.is_file():
+            continue
+        out.append(p)
+    out.sort(key=lambda p: str(p))
+    return out
+
+
+def _filesystem_walk(root: Path) -> Iterable[Path]:
+    """Recursive working-tree walk that prunes ``ALWAYS_SKIP_DIRNAMES``
+    and dotfile directories before descending.
+
+    Used as the fallback when git isn't available. Pruning at the
+    directory level (not per file) avoids the multi-second hit from
+    ``rglob('*')`` over a populated ``node_modules``.
+    """
+    if not root.is_dir():
+        return
+    stack: list[Path] = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = sorted(current.iterdir(), key=lambda p: p.name)
+        except OSError:
+            continue
+        for entry in entries:
+            name = entry.name
+            if entry.is_dir():
+                if name.startswith(".") and entry != root:
+                    continue
+                if name in ALWAYS_SKIP_DIRNAMES:
+                    continue
+                stack.append(entry)
+            elif entry.is_file():
+                yield entry
+
+
 def walk_spec_files(
     root: Path, *, manifest: dict | None = None
 ) -> Iterable[Path]:
     """
     Yield every file inside `root` that belongs in the bundle, in
-    deterministic order. Skips dotfile dirs (`.git`, `.spec`, …).
+    deterministic order. Skips dotfile dirs (`.git`, `.spec`, …),
+    well-known dependency / build trees (``node_modules``, ``dist``,
+    ``__pycache__``, …), and — when ``root`` is inside a git worktree
+    and the ``git`` binary is available — anything ``.gitignore``
+    excludes.
 
     Bundle-membership is resolved through `is_bundle_path`:
       - `spec.yaml` — always in.
@@ -196,17 +418,15 @@ def walk_spec_files(
     ``spec add .cursor/rules/foo.mdc`` or by listing the path in
     ``spec.include``.
     """
-    root = root.resolve()
-    for p in sorted(root.rglob("*")):
-        if not p.is_file():
-            continue
+    abs_root = root.resolve()
+    for p in _iter_walk_candidates(abs_root):
         try:
-            parts = p.relative_to(root).parts
+            parts = p.relative_to(abs_root).parts
         except ValueError:
             continue
-        if any(part.startswith(".") for part in parts[:-1]):
+        if _path_is_skipped(parts):
             continue
-        rel = rel_posix(root, p)
+        rel = rel_posix(abs_root, p)
         if not is_spec_file(rel):
             continue
         # `.prompts` and `spec.yaml` are always in; only `.md`-class
@@ -220,15 +440,45 @@ def walk_spec_files(
 
 
 def walk_all_files(root: Path) -> Iterable[Path]:
-    """Yield every file under `root` (for `status` to report non-spec)."""
-    root = root.resolve()
-    for p in sorted(root.rglob("*")):
-        if not p.is_file():
+    """Yield every file under `root` (for `status` to report non-spec).
+
+    Same pruning rules as :func:`walk_spec_files` — dotfile dirs,
+    well-known dependency trees, and anything ``.gitignore`` excludes
+    when running inside a git worktree. ``spec status`` is meant to
+    surface what would land in a push, so showing a thousand
+    ``node_modules`` rows is just noise the user has to scroll past.
+    """
+    abs_root = root.resolve()
+    for p in _iter_walk_candidates(abs_root):
+        try:
+            parts = p.relative_to(abs_root).parts
+        except ValueError:
             continue
-        parts = p.relative_to(root).parts
-        if any(part.startswith(".") for part in parts[:-1]):
+        if _path_is_skipped(parts):
             continue
         yield p
+
+
+def _iter_walk_candidates(root: Path) -> Iterable[Path]:
+    """Backbone of both walkers — defer to ``git ls-files`` when in a
+    repo, otherwise filesystem-walk with the same pruning rules.
+
+    Caller is responsible for resolving ``root`` first so the absolute
+    paths returned by ``git ls-files`` line up with the ``relative_to``
+    arithmetic the walkers do downstream.
+
+    The git-aware path is what makes ``spec add .`` honor whatever the
+    user already typed into ``.gitignore`` (build outputs, vendored
+    deps, secrets, …) without us having to re-implement gitignore
+    parsing. The filesystem fallback covers fresh checkouts and
+    non-git workflows; both produce paths sorted by string for stable
+    output.
+    """
+    via_git = _git_ls_tracked_and_untracked(root)
+    if via_git is not None:
+        yield from via_git
+        return
+    yield from _filesystem_walk(root)
 
 
 # ---------------------------------------------------------------------------
