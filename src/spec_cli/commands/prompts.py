@@ -583,6 +583,10 @@ def _session_assistant_models_hint(session: Session) -> str | None:
     return f"{total} assistant · {bits}{tail}"
 
 
+# How many pending sessions `spec status` lists before "…and N more".
+PENDING_CAPTURE_PEEK_MAX_EXAMPLES = 30
+
+
 @dataclass(frozen=True)
 class PendingCapturePeek:
     """Read-only snapshot of "what would `spec prompts capture` write?".
@@ -592,7 +596,8 @@ class PendingCapturePeek:
     a ``.prompts`` file. ``new_session_count`` is the number of distinct
     session ids whose live transcript has more turns than the on-disk
     snapshot; ``new_turn_count`` is the total number of *turns* across
-    those sessions. Examples are at most a handful of
+    those sessions. ``examples`` lists at most
+    ``PENDING_CAPTURE_PEEK_MAX_EXAMPLES`` sessions as
     (id, title, session_model, assistant_hint) tuples — ``assistant_hint``
     summarises per-turn models on assistant rows only.
     """
@@ -670,7 +675,7 @@ def peek_pending_prompt_captures(bundle_root: Path) -> PendingCapturePeek | None
                 s.model,
                 _session_assistant_models_hint(s),
             )
-            for s in new_sessions[:3]
+            for s in new_sessions[:PENDING_CAPTURE_PEEK_MAX_EXAMPLES]
         )
         return PendingCapturePeek(
             new_session_count=len(new_sessions),
