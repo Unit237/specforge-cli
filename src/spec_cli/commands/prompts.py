@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -552,6 +553,36 @@ def run_git_hook_post_merge_rollup(bundle_root: Path) -> None:
     dim(f"  rolled: {branch_names}")
 
 
+def _assistant_models_aggregate_line(sessions: list[Session]) -> str | None:
+    """One-line ``model (count)`` summary across all pending assistant turns."""
+    counts: Counter[str] = Counter()
+    for s in sessions:
+        for t in s.turns:
+            if t.role == "assistant" and t.model:
+                counts[t.model] += 1
+    if not counts:
+        return None
+    parts = [f"{m} ({n})" for m, n in counts.most_common(8)]
+    return ", ".join(parts)
+
+
+def _session_assistant_models_hint(session: Session) -> str | None:
+    """Short hint for one session's assistant-turn model mix."""
+    counts: Counter[str] = Counter(
+        t.model for t in session.turns if t.role == "assistant" and t.model
+    )
+    if not counts:
+        return None
+    total = sum(counts.values())
+    if len(counts) == 1:
+        (m, k) = counts.most_common(1)[0]
+        return f"{k} assistant · {m}"
+    bits = ", ".join(f"{m}×{k}" for m, k in counts.most_common(3))
+    more = len(counts) - 3
+    tail = f" (+{more})" if more > 0 else ""
+    return f"{total} assistant · {bits}{tail}"
+
+
 @dataclass(frozen=True)
 class PendingCapturePeek:
     """Read-only snapshot of "what would `spec prompts capture` write?".
@@ -561,15 +592,17 @@ class PendingCapturePeek:
     a ``.prompts`` file. ``new_session_count`` is the number of distinct
     session ids whose live transcript has more turns than the on-disk
     snapshot; ``new_turn_count`` is the total number of *turns* across
-    those sessions. Examples are at most a handful of (id, title)
-    tuples for display.
+    those sessions. Examples are at most a handful of
+    (id, title, session_model, assistant_hint) tuples — ``assistant_hint``
+    summarises per-turn models on assistant rows only.
     """
 
     new_session_count: int
     new_turn_count: int
     branch: str
     dest_relpath: str
-    examples: tuple[tuple[str, str], ...]
+    examples: tuple[tuple[str, str, str | None, str | None], ...]
+    assistant_models_line: str | None
 
 
 def peek_pending_prompt_captures(bundle_root: Path) -> PendingCapturePeek | None:
@@ -631,7 +664,12 @@ def peek_pending_prompt_captures(bundle_root: Path) -> PendingCapturePeek | None
 
         dest = _branch_prompts_path(bundle_root, branch)
         examples = tuple(
-            (s.id, (s.title or "").strip() or "(untitled)")
+            (
+                s.id,
+                (s.title or "").strip() or "(untitled)",
+                s.model,
+                _session_assistant_models_hint(s),
+            )
             for s in new_sessions[:3]
         )
         return PendingCapturePeek(
@@ -640,6 +678,7 @@ def peek_pending_prompt_captures(bundle_root: Path) -> PendingCapturePeek | None
             branch=branch,
             dest_relpath=f"{PROMPTS_DIRNAME}/{dest.name}",
             examples=examples,
+            assistant_models_line=_assistant_models_aggregate_line(new_sessions),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1721,6 +1760,49 @@ def check_cmd(ci_mode: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _aggregate_session_models_on_disk(bundle_root: Path) -> tuple[dict[str, int], int] | None:
+    """Count ``session.model`` across every readable ``.prompts`` file.
+
+    Mirrors the web "compile routing" summary: pinned model → number of
+    sessions, plus a portable count when ``model`` is absent. Returns
+    ``None`` when there are no sessions on disk (empty tree or only
+    unreadable files).
+    """
+    by_model: dict[str, int] = {}
+    portable = 0
+    total_sessions = 0
+    for tp in iter_all_prompts(bundle_root):
+        try:
+            pf = read_prompts_file(tp.abs_path)
+        except (OSError, PromptSchemaError):
+            continue
+        for s in pf.sessions:
+            total_sessions += 1
+            m = (s.model or "").strip()
+            if m:
+                by_model[m] = by_model.get(m, 0) + 1
+            else:
+                portable += 1
+    if total_sessions == 0:
+        return None
+    return by_model, portable
+
+
+def _aggregate_assistant_turn_models_on_disk(bundle_root: Path) -> dict[str, int] | None:
+    """Count ``turn.model`` on assistant rows across readable ``.prompts`` files."""
+    counts: Counter[str] = Counter()
+    for tp in iter_all_prompts(bundle_root):
+        try:
+            pf = read_prompts_file(tp.abs_path)
+        except (OSError, PromptSchemaError):
+            continue
+        for s in pf.sessions:
+            for t in s.turns:
+                if t.role == "assistant" and t.model:
+                    counts[t.model] += 1
+    return dict(counts) if counts else None
+
+
 @prompts_group.command("status")
 def status_cmd() -> None:
     """Summarize the prompt tiers in the bundle."""
@@ -1743,6 +1825,26 @@ def status_cmd() -> None:
         console.print(f"  [sf.warn]pending:  {counts.pending}[/]   (awaiting review)")
     else:
         console.print("  pending:  0")
+
+    agg = _aggregate_session_models_on_disk(root)
+    if agg is not None:
+        by_model, portable = agg
+        console.print()
+        console.print("  [sf.muted]session models (on disk):[/]")
+        for model, n in sorted(by_model.items(), key=lambda kv: (-kv[1], kv[0])):
+            console.print(f"    [sf.point]{model}[/]  [sf.muted]· {n} session(s)[/]")
+        if portable:
+            console.print(
+                f"    [sf.muted]portable[/]  [sf.muted]· {portable} session(s) "
+                "(no model pinned)[/]"
+            )
+
+    asst = _aggregate_assistant_turn_models_on_disk(root)
+    if asst:
+        console.print()
+        console.print("  [sf.muted]assistant turn models (on disk):[/]")
+        for model, n in sorted(asst.items(), key=lambda kv: (-kv[1], kv[0])):
+            console.print(f"    [sf.point]{model}[/]  [sf.muted]· {n} turn(s)[/]")
 
 
 # ---------------------------------------------------------------------------

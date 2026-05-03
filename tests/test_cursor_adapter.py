@@ -97,6 +97,7 @@ def _add_composer(
     name: str | None = None,
     created_at_ms: int = 1_700_000_000_000,
     last_updated_ms: int = 1_700_000_000_500,
+    model_config: dict | None = None,
 ) -> None:
     """Write a composer's metadata + bubbles to the global DB.
 
@@ -118,6 +119,8 @@ def _add_composer(
             {"bubbleId": b["id"], "type": b["type"]} for b in bubbles
         ],
     }
+    if model_config is not None:
+        composer_data["modelConfig"] = model_config
     conn.execute(
         "INSERT OR REPLACE INTO cursorDiskKV VALUES (?, ?)",
         (f"composerData:{composer_id}", json.dumps(composer_data)),
@@ -200,6 +203,84 @@ def test_read_cursor_sessions_extracts_user_and_assistant_turns(tmp_path, monkey
     assert s.turns[1].text is None  # non-verbose
     assert s.turns[1].summary is not None
     assert "scanning" in s.turns[1].summary.lower()
+
+
+def test_read_cursor_sessions_falls_back_to_composer_model_config(tmp_path, monkeypatch):
+    """Assistant bubbles often omit modelInfo; composerData.modelConfig does not."""
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path))
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+
+    composer_id = "66666666-6666-4666-a666-666666666666"
+    _make_workspace(tmp_path, "ws-mc", bundle, [composer_id])
+    _add_composer(
+        tmp_path,
+        composer_id,
+        name="Model fallback",
+        model_config={"modelName": "claude-4.5-opus-high-thinking", "maxMode": False},
+        bubbles=[
+            {
+                "id": "bub-u",
+                "type": 1,
+                "text": "Hello.",
+                "createdAt": "2026-03-10T11:00:00Z",
+            },
+            {
+                "id": "bub-a1",
+                "type": 2,
+                "text": "First reply without per-bubble modelInfo.",
+                "createdAt": "2026-03-10T11:00:10Z",
+            },
+            {
+                "id": "bub-a2",
+                "type": 2,
+                "text": "Second reply also without modelInfo.",
+                "createdAt": "2026-03-10T11:00:20Z",
+            },
+        ],
+    )
+
+    sessions = list(read_cursor_sessions(bundle))
+    assert len(sessions) == 1
+    s = sessions[0]
+    assert s.model == "claude-4.5-opus-high-thinking"
+    assert s.turns[1].model == "claude-4.5-opus-high-thinking"
+    assert s.turns[2].model == "claude-4.5-opus-high-thinking"
+
+
+def test_read_cursor_sessions_bubble_model_info_overrides_model_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path))
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+
+    composer_id = "77777777-7777-4777-a777-777777777777"
+    _make_workspace(tmp_path, "ws-ov", bundle, [composer_id])
+    _add_composer(
+        tmp_path,
+        composer_id,
+        model_config={"modelName": "default-from-config"},
+        bubbles=[
+            {"id": "u1", "type": 1, "text": "Q?", "createdAt": "2026-03-10T11:00:00Z"},
+            {
+                "id": "a1",
+                "type": 2,
+                "text": "Bubble-specific model wins.",
+                "createdAt": "2026-03-10T11:00:05Z",
+                "modelInfo": {"modelName": "from-bubble"},
+            },
+            {
+                "id": "a2",
+                "type": 2,
+                "text": "This one falls back to composer default.",
+                "createdAt": "2026-03-10T11:00:10Z",
+            },
+        ],
+    )
+
+    s = list(read_cursor_sessions(bundle))[0]
+    assert s.model == "from-bubble"
+    assert s.turns[1].model == "from-bubble"
+    assert s.turns[2].model == "default-from-config"
 
 
 def test_read_cursor_sessions_returns_empty_when_store_missing(tmp_path, monkeypatch):

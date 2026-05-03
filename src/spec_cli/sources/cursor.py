@@ -16,7 +16,9 @@ Cursor stores chat data in two places:
   - **Global** ``state.vscdb`` under ``<USER_DATA>/User/globalStorage/``.
     Cursor stores per-thread metadata under
     ``cursorDiskKV[composerData:<composerId>]`` (which carries
-    ``fullConversationHeadersOnly`` — the ordered list of bubble ids)
+    ``fullConversationHeadersOnly`` — the ordered list of bubble ids,
+    plus ``modelConfig`` with ``modelName`` when bubbles omit
+    ``modelInfo``)
     and per-message bodies under
     ``cursorDiskKV[bubbleId:<composerId>:<bubbleId>]``.
 
@@ -378,6 +380,27 @@ def _bubble_text(bubble: dict[str, Any]) -> str:
     return sanitize_for_toml_text(text)
 
 
+def _cursor_composer_default_model(composer_data: dict[str, Any]) -> str | None:
+    """Thread-level model when assistant bubbles omit ``modelInfo``.
+
+    Live Cursor stores often put the active model only on
+    ``composerData.modelConfig`` (``modelName`` / ``model``) while many
+    assistant ``bubbleId:*`` payloads have no ``modelInfo`` at all.
+    We still attach that default to each assistant turn so capture,
+    compiler routing, and ``spec status`` stay truthful.
+    """
+    mc = composer_data.get("modelConfig")
+    if not isinstance(mc, dict):
+        return None
+    raw = mc.get("modelName") or mc.get("model")
+    if not isinstance(raw, str):
+        return None
+    m = raw.strip()
+    if not m:
+        return None
+    return m[:MAX_TURN_MODEL_CHARS]
+
+
 def _ms_epoch_to_utc(ms: Any) -> datetime | None:
     if not isinstance(ms, (int, float)) or ms <= 0:
         return None
@@ -456,6 +479,7 @@ def _build_session(
 
     builder.started_at = _ms_epoch_to_utc(composer_data.get("createdAt"))
     builder.ended_at = _ms_epoch_to_utc(composer_data.get("lastUpdatedAt"))
+    default_model = _cursor_composer_default_model(composer_data)
 
     for header in headers:
         if not isinstance(header, dict):
@@ -487,8 +511,8 @@ def _build_session(
                 m = model_info.get("modelName") or model_info.get("model")
                 if isinstance(m, str) and m.strip():
                     bubble_model = m.strip()[:MAX_TURN_MODEL_CHARS]
-                    if builder.model is None:
-                        builder.model = bubble_model
+            if bubble_model is None and default_model:
+                bubble_model = default_model
             # If the bubble had no human-readable text and we don't yet
             # extract Cursor's tool calls (deferred — see module-level
             # docstring), there's nothing meaningful to record.
@@ -504,6 +528,8 @@ def _build_session(
                     model=bubble_model,
                 )
             )
+            if builder.model is None and bubble_model:
+                builder.model = bubble_model
         # Other bubble types (system / status) are dropped wholesale.
 
     session = builder.to_session(verbose=verbose, name=name)

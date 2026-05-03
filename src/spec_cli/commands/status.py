@@ -65,12 +65,16 @@ def _print_pending_prompt_captures(root) -> None:
         f"[sf.muted]· {peek.new_session_count} session(s), "
         f"{peek.new_turn_count} new turn(s) since last capture[/]"
     )
-    for sid, title in peek.examples:
+    for sid, title, model, asst_hint in peek.examples:
         short = sid[:12] + ("…" if len(sid) > 12 else "")
-        console.print(f"  [sf.muted]·[/] {short}  {title}")
+        model_bit = f"  [sf.muted]· session {model}[/]" if model else ""
+        hint_bit = f"  [sf.muted]· {asst_hint}[/]" if asst_hint else ""
+        console.print(f"  [sf.muted]·[/] {short}  {title}{model_bit}{hint_bit}")
     if peek.new_session_count > len(peek.examples):
         more = peek.new_session_count - len(peek.examples)
         dim(f"  · …and {more} more")
+    if peek.assistant_models_line:
+        dim(f"  Assistant models (pending turns): {peek.assistant_models_line}")
     dim(
         f"  → on next `spec add .` or `git commit`, these write to "
         f"{peek.dest_relpath}."
