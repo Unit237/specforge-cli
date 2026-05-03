@@ -234,13 +234,33 @@ def _pre_push_includes_branch_ref(stdin_text: str) -> bool:
 
 
 def run_git_hook_pre_commit() -> None:
-    """Mirror ``git add`` → ``spec add`` / ``git rm`` → ``spec unstage`` for paths in the bundle."""
+    """Capture new agent sessions, then mirror ``git add`` / ``git rm`` into spec staging.
+
+    Capture runs **before** the index mirror loop on purpose. Two reasons:
+
+    1. Capture writes ``prompts/<branch>.prompts`` and ``git add``s it.
+       Doing this before the mirror loop means the mirror sees the
+       freshly-staged path in ``git diff --cached`` and ``spec add``s
+       it — single pass, no separate spec-staging code path.
+    2. ``pre-commit`` runs before git locks the cache_tree it'll commit.
+       Capturing here lets the new ``.prompts`` content land in the
+       *same* commit, which is the whole point — capturing in
+       ``commit-msg`` instead (the prior design) updated the index
+       file but git ignored the change because the tree was already
+       built. The user then had to commit twice. See
+       :func:`run_capture_for_pre_commit_hook` for the design notes.
+    """
     top = repo_toplevel(Path.cwd())
     if top is None:
         return
     bundle = resolve_bundle_root_for_git_hook(top)
     if bundle is None:
         return
+
+    from .prompts import run_capture_for_pre_commit_hook
+
+    run_capture_for_pre_commit_hook(bundle, repo_top=top)
+
     try:
         manifest = load_manifest(bundle).data
     except (OSError, ValueError, yaml.YAMLError):

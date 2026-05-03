@@ -85,14 +85,17 @@ PRE_COMMIT_HOOK_BEGIN: str = "# >>> spec pre-commit >>>"
 PRE_COMMIT_HOOK_END: str = "# <<< spec pre-commit <<<"
 PRE_COMMIT_HOOK_BODY: str = f"""\
 {PRE_COMMIT_HOOK_BEGIN}
-# Auto-installed by `spec init`. Runs before the commit is recorded:
-# mirrors paths you `git add`-ed into `spec add` (and removals into
-# `spec unstage`) so spec staging tracks the same bundle files as git.
-# Never blocks the commit — failures are swallowed per line below.
+# Auto-installed by `spec init`. Runs before git locks the tree for the
+# pending commit: captures any new Cursor / Claude Code sessions into
+# `prompts/<branch>.prompts`, `git add`s the file so it ships in the
+# SAME commit (no follow-up commit needed), then mirrors paths you
+# `git add`-ed into `spec add` (and removals into `spec unstage`) so
+# spec staging tracks the same bundle files as git. Never blocks the
+# commit — failures are swallowed per line below.
 if command -v spec >/dev/null 2>&1; then
   spec git-hooks pre-commit || true
 else
-  echo "spec: CLI not on PATH; skipping spec/git index sync." >&2
+  echo "spec: CLI not on PATH; skipping prompts capture + spec/git index sync." >&2
 fi
 {PRE_COMMIT_HOOK_END}
 """
@@ -111,14 +114,13 @@ COMMIT_MSG_HOOK_BEGIN: str = "# >>> spec commit-msg >>>"
 COMMIT_MSG_HOOK_END: str = "# <<< spec commit-msg <<<"
 COMMIT_MSG_HOOK_BODY: str = f"""\
 {COMMIT_MSG_HOOK_BEGIN}
-# Auto-installed by `spec init`. Runs before git records the commit: captures
-# new sessions into prompts/<branch>.prompts and git-adds them so they ship in
-# the same commit. Failures are swallowed — capture never blocks a commit.
-if command -v spec >/dev/null 2>&1; then
-  spec git-hooks commit-msg "$1" || true
-else
-  echo "spec: CLI not on PATH; skipping prompts capture." >&2
-fi
+# Deprecated: prompts capture moved to the pre-commit hook so the
+# resulting `.prompts` file lands in the SAME commit as the rest of
+# the user's changes. `commit-msg` runs after git locks the cache_tree,
+# so any modifications + `git add`s here update the index file but git
+# ignores them for this commit (the tree is already built). Block left
+# in place so existing installs replace it cleanly on `spec git-hooks
+# install`; new installs may eventually drop it entirely.
 {COMMIT_MSG_HOOK_END}
 """
 

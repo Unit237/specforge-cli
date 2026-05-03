@@ -39,11 +39,7 @@ from ..constants import (
     PROMPTS_DIRNAME,
     PROMPTS_PENDING_DIRNAME,
 )
-from ..git import (
-    commit_gpgsign_enabled,
-    predict_commit_object_sha,
-    read_git_context,
-)
+from ..git import read_git_context
 from ..prompts import (
     CommitMeta,
     PromptSchemaError,
@@ -154,33 +150,6 @@ def _spec_stage_paths(bundle_root: Path, paths: list[Path]) -> None:
         dirty = True
     if dirty:
         save_index(idx)
-
-
-def _patch_branch_file_commit_shas(
-    dest: Path,
-    *,
-    session_ids: frozenset[str],
-    commit_sha: str | None,
-) -> bool:
-    """Rewrite ``commit_sha`` on selected sessions; return True if the file changed."""
-    if not session_ids or not dest.exists():
-        return False
-    try:
-        pf = read_prompts_file(dest)
-    except PromptSchemaError:
-        return False
-    changed = False
-    for s in pf.sessions:
-        if s.id not in session_ids or s.commit is None:
-            continue
-        if s.commit.commit_sha != commit_sha:
-            s.commit.commit_sha = commit_sha
-            changed = True
-    if not changed:
-        return False
-    dest.write_text(render_prompts_file(pf), encoding="utf-8")
-    return True
-
 
 
 
@@ -781,22 +750,32 @@ def _session_has_new_turns(
     return len(session.turns) > already_counts.get(session.id, 0)
 
 
-def run_capture_for_commit_msg_hook(
+def run_capture_for_pre_commit_hook(
     bundle_root: Path,
     *,
     repo_top: Path,
-    message_bytes: bytes,
 ) -> None:
-    """Run capture while git is building a commit (``commit-msg`` hook).
+    """Run capture during ``pre-commit`` so .prompts updates land in the SAME commit.
 
-    Writes sessions with ``commit_sha`` unset, ``git add``s the branch
-    ``.prompts`` file so it enters the index, predicts the pending commit
-    SHA from the message bytes git passed to the hook, then patches the
-    file and stages again. Swallows nearly all failures — hooks must not
-    block ``git commit``.
+    Why pre-commit and not commit-msg: git locks the cache_tree (the tree
+    object that goes into the commit) **before** commit-msg fires. Any
+    file modifications + ``git add`` we do inside commit-msg update the
+    index file but git ignores those changes for *this* commit — it
+    already built the tree. The user then sees ``modified:
+    prompts/<branch>.prompts`` in ``git status`` after the commit
+    completes, and has to commit twice.
+
+    pre-commit runs **before** cache_tree is built, so anything we
+    capture + ``git add`` here is part of the commit naturally — no
+    second commit, no post-commit drift. The trade-off: we don't yet
+    know the commit SHA at this point, so the captured sessions land
+    with ``commit_sha = None``. ``spec push`` and downstream tooling
+    backfill the SHA from the actual commit later; the file isn't
+    modified again, so the working tree stays clean.
+
+    Swallows nearly all failures — hooks must never block ``git commit``.
     """
     try:
-        skip_predict = commit_gpgsign_enabled(repo_top)
         record_bundle_path(bundle_root)
         paths_for_lookup = historical_bundle_paths(bundle_root)
 
@@ -805,7 +784,6 @@ def run_capture_for_commit_msg_hook(
         claude_available = claude_store.exists()
         cursor_available = cursor_store.exists()
         if not claude_available and not cursor_available:
-            dim("No coding-agent stores found on this machine.")
             return
 
         git = read_git_context(bundle_root)
@@ -842,19 +820,22 @@ def run_capture_for_commit_msg_hook(
                 return
 
         if not discovered:
-            dim("No new sessions to capture.")
             return
 
         for s in discovered:
             if s.operator is None:
                 s.operator = author_email
+            # commit_sha left None on purpose — pre-commit doesn't yet
+            # know the SHA git is about to mint. Backfill is a downstream
+            # concern; stamping here would re-modify the file post-commit
+            # and re-introduce the very bug this hook is fixing.
             _stamp_capture_commit(
                 s, git=git, fallback_branch=branch, commit_sha=None
             )
 
         dest = _branch_prompts_path(bundle_root, branch)
         try:
-            changed, appended_ids = _merge_into_branch_file(
+            changed, _appended_ids = _merge_into_branch_file(
                 dest,
                 branch=branch,
                 author_name=author_name,
@@ -865,7 +846,6 @@ def run_capture_for_commit_msg_hook(
             return
 
         if changed == 0:
-            dim("No new sessions to capture (already present in branch file).")
             return
 
         rel_dest = f"{PROMPTS_DIRNAME}/{dest.name}"
@@ -880,21 +860,12 @@ def run_capture_for_commit_msg_hook(
                 "those before pushing."
             )
 
+        # Stage into git so the file lands in the cache_tree git is
+        # about to build. Spec staging is handled downstream by the
+        # mirror loop in run_git_hook_pre_commit, which calls
+        # `spec add` for every newly-staged path; redundant
+        # `_spec_stage_paths` here is unnecessary.
         _git_stage_paths(repo_top, [dest])
-        _spec_stage_paths(bundle_root, [dest])
-
-        predicted: str | None = None
-        if not skip_predict:
-            predicted = predict_commit_object_sha(repo_top, message_bytes)
-
-        if predicted and appended_ids:
-            if _patch_branch_file_commit_shas(
-                dest,
-                session_ids=appended_ids,
-                commit_sha=predicted,
-            ):
-                _git_stage_paths(repo_top, [dest])
-                _spec_stage_paths(bundle_root, [dest])
 
         pointer("wrote", str(dest.relative_to(bundle_root)))
         dim(
@@ -903,6 +874,29 @@ def run_capture_for_commit_msg_hook(
         )
     except (OSError, subprocess.SubprocessError):
         return
+
+
+def run_capture_for_commit_msg_hook(
+    bundle_root: Path,
+    *,
+    repo_top: Path,
+    message_bytes: bytes,
+) -> None:
+    """Deprecated: capture moved to ``pre-commit`` so updates land in the same commit.
+
+    Kept as a no-op so older installations (with the commit-msg block
+    pointing at ``spec git-hooks commit-msg``) don't error out and
+    don't double-capture. ``run_capture_for_pre_commit_hook`` is the
+    real implementation now; ``spec git-hooks install`` rewrites the
+    commit-msg hook body to a stub on next install.
+
+    The arguments stay the same as the historical signature for
+    back-compat with any external callers; both are unused here.
+    """
+    _ = bundle_root
+    _ = repo_top
+    _ = message_bytes
+    return
 
 
 # ---------------------------------------------------------------------------
