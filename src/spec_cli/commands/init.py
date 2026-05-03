@@ -744,9 +744,9 @@ def init_cmd(
         dim("Skipped git hook installation (--skip-git-hook).")
     elif git_dir is None:
         dim(
-            "Not a git worktree — skipped git hooks. Run "
-            "`git init && spec init --force` to install them, or wire "
-            "`spec prompts capture` / `spec push` manually."
+            "Not a git worktree — skipped git hooks. Run `git init` "
+            "(the spec installer wires `git init` to also run `spec init`), "
+            "or rerun `spec init --force` after the worktree exists."
         )
 
     if gitignore_status and gitignore_path is not None:

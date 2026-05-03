@@ -14,6 +14,7 @@ from .commands.login import login_cmd, logout_cmd
 from .commands.prompts import prompts_group
 from .commands.pull import pull_cmd
 from .commands.push import push_cmd
+from .commands.shell import shell_group
 from .commands.unstage import unstage_cmd
 from .commands.status import status_cmd
 
@@ -35,6 +36,7 @@ def cli() -> None:
 
 cli.add_command(init_cmd)
 cli.add_command(git_hooks_group)
+cli.add_command(shell_group)
 cli.add_command(login_cmd)
 cli.add_command(logout_cmd)
 cli.add_command(status_cmd)
