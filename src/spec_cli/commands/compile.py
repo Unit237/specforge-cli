@@ -53,6 +53,30 @@ def _compile_prompt_path(root: Path) -> Path:
     return root / INDEX_DIRNAME / COMPILE_PROMPT_FILENAME
 
 
+def _prompt_file_count(bundle: object) -> int:
+    """Count prompt-context files across old/new assembly shapes.
+
+    `AssembledBundle` used to expose `prompt_templates` and `session_files`.
+    v0.2+ now uses tiered `.prompts` buckets (`curated_prompts`,
+    `captured_prompts`) plus a compatibility mirror (`prompts_files`).
+    """
+    # New shape: one flat mirror of all compilable `.prompts` files.
+    prompts_files = getattr(bundle, "prompts_files", None)
+    if isinstance(prompts_files, list):
+        return len(prompts_files)
+    # Tiered fallback if mirror is absent.
+    curated = getattr(bundle, "curated_prompts", None)
+    captured = getattr(bundle, "captured_prompts", None)
+    if isinstance(curated, list) or isinstance(captured, list):
+        return len(curated or []) + len(captured or [])
+    # Legacy shape.
+    templates = getattr(bundle, "prompt_templates", None)
+    sessions = getattr(bundle, "session_files", None)
+    if isinstance(templates, list) or isinstance(sessions, list):
+        return len(templates or []) + len(sessions or [])
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # API mode — shell out to the separate compiler package
 # ---------------------------------------------------------------------------
@@ -191,8 +215,7 @@ def compile_cmd(ctx: click.Context, via: str, to_stdout: bool) -> None:
     console.print(
         f"[sf.label]compile[/] [sf.muted]· "
         f"{len(bundle.spec_files)} spec file(s), "
-        f"{len(bundle.prompt_templates)} prompt template(s), "
-        f"{len(bundle.session_files)} session(s)[/]"
+        f"{_prompt_file_count(bundle)} prompt file(s)[/]"
     )
     ok(f"compile prompt ready · {dest.relative_to(root)}")
     pointer("next", "open Claude Code in this directory and say \"compile\"")

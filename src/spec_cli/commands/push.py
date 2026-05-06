@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 import click
@@ -29,6 +30,42 @@ from ..stage import (
     sha256,
 )
 from ..ui import console, dim, fatal, ok, reject, warn
+
+
+def _cloud_slugify(name: str) -> str:
+    """Match ``slugify`` in ``backend/app/main.py`` so manifest ``name`` can
+    map to the slug in ``cloud.project`` when auto-creating on push."""
+    s = re.sub(r"[^\w\s-]", "", name.lower())
+    s = re.sub(r"[-\s]+", "-", s).strip("-")
+    return s or "project"
+
+
+def _project_resolve_not_found(e: ApiError) -> bool:
+    if e.status == 404:
+        return True
+    if e.status != 400 or not isinstance(e.body, dict):
+        return False
+    d = e.body.get("detail")
+    return isinstance(d, str) and "not found" in d.lower()
+
+
+def _handles_match(left: str, right: str | None) -> bool:
+    if not right:
+        return False
+    return left.strip().lower() == right.strip().lower()
+
+
+def _cloud_project_literal(
+    handle: str,
+    slug: str,
+    *,
+    prior_raw: str | None,
+    default_handle: str | None,
+) -> str:
+    prior = (prior_raw or "").strip()
+    if prior and "/" not in prior and _handles_match(handle, default_handle):
+        return slug
+    return f"{handle}/{slug}"
 
 
 def _chunk(seq, n):
@@ -90,6 +127,11 @@ def push_cmd(
 
       spec push https://spec.lightreach.io/acme/billing.git
 
+    If `cloud.project` points at your signed-in handle and that bundle
+    does not exist yet, this command creates it on Cloud before uploading
+    (the server may assign a suffixed slug when the base name is taken;
+    `spec.yaml` is updated when that happens).
+
     When the push originates from a non-trunk git branch, `spec push`
     automatically opens (or re-opens) a Cloud review on that branch —
     same shape as `gh pr create` after a `git push`. The first push
@@ -118,6 +160,7 @@ def push_cmd(
 
     # Resolve the target: URL wins over --project wins over manifest.
     url_target = None
+    cloud_project_prior_raw: str | None = project or manifest.cloud_project
     if remote_url:
         if project:
             fatal("Pass either a URL or --project, not both.")
@@ -129,7 +172,7 @@ def push_cmd(
             return
         handle, slug = url_target.handle, url_target.slug
     else:
-        raw = project or manifest.cloud_project
+        raw = cloud_project_prior_raw
         if not raw:
             fatal(
                 "No cloud project configured. Add `cloud.project: <handle>/<slug>` "
@@ -187,20 +230,19 @@ def push_cmd(
             }
         )
 
-    header_target = url_target.raw_url if url_target else f"{handle}/{slug}"
-    git_desc = (
-        f"{git.branch}@{git.commit_sha[:7]}"
-        if git.branch and git.commit_sha
-        else "no-git"
-    )
-    console.print(
-        f"[sf.label]push[/] [bold]{header_target}[/] "
-        f"[sf.muted]· {len(payload)} files · {git_desc}[/]"
-    )
-    for item in payload:
-        dim(f"  {item['path']}")
-
     if dry_run:
+        header_target = url_target.raw_url if url_target else f"{handle}/{slug}"
+        git_desc = (
+            f"{git.branch}@{git.commit_sha[:7]}"
+            if git.branch and git.commit_sha
+            else "no-git"
+        )
+        console.print(
+            f"[sf.label]push[/] [bold]{header_target}[/] "
+            f"[sf.muted]· {len(payload)} files · {git_desc}[/]"
+        )
+        for item in payload:
+            dim(f"  {item['path']}")
         dim("\n--dry-run: skipping upload.")
         return
 
@@ -229,33 +271,97 @@ def push_cmd(
     try:
         project_info = client.resolve_project(handle, slug)
     except ApiError as e:
-        # The server returns the same "Bundle not found" body for "doesn't
-        # exist" and "you can't read it" — that's deliberate, so a non-member
-        # can't probe for project existence. Surfacing the two cases the
-        # user can fix themselves keeps the error actionable without
-        # leaking which one applies. (Pending-invite collaborators are by
-        # far the common case in practice — the message intentionally lists
-        # that one first.)
-        detail = ""
-        if isinstance(e.body, dict):
-            d = e.body.get("detail")
-            if isinstance(d, str):
-                detail = d.lower()
-        if e.status == 400 and "not found" in detail:
-            ui_host = creds.api_base.rstrip("/")
-            fatal(
-                f"Could not resolve project '{handle}/{slug}': {e}\n"
-                f"  · If you were invited as a collaborator, accept the invite "
-                f"at {ui_host} first (sign-in → bundle → invite link), then "
-                f"re-run `spec push`.\n"
-                f"  · If this is your own bundle, register it at "
-                f"{ui_host}/{handle} (\"+ New bundle\") with slug `{slug}`, "
-                f"then re-run `spec push`."
+        if _project_resolve_not_found(e) and _handles_match(handle, creds.user_handle):
+            create_name = slug
+            bundle_display_name = manifest.name
+            if isinstance(bundle_display_name, str) and bundle_display_name.strip():
+                if _cloud_slugify(bundle_display_name.strip()) == slug:
+                    create_name = bundle_display_name.strip()
+            dim(
+                f"No Cloud bundle at `{handle}/{slug}` — "
+                f"creating one under your account…"
             )
+            try:
+                project_info = client.create_project(create_name)
+            except ApiError as ce:
+                fatal(
+                    f"Could not create Cloud bundle `{handle}/{slug}`: {ce}\n"
+                    f"  Fix the error above, or create the bundle manually at "
+                    f"{creds.api_base.rstrip('/')}/{handle}."
+                )
+                return
+            actual_slug = project_info.get("slug")
+            if not isinstance(actual_slug, str) or not actual_slug.strip():
+                fatal(
+                    "Cloud created a bundle but the response had no usable "
+                    "`slug` field — upgrade the CLI or report this to support."
+                )
+                return
+            actual_slug = actual_slug.strip()
+            if actual_slug != slug:
+                new_lit = _cloud_project_literal(
+                    handle,
+                    actual_slug,
+                    prior_raw=cloud_project_prior_raw,
+                    default_handle=default_handle,
+                )
+                manifest.set_cloud_project(new_lit)
+                try:
+                    dump_manifest(manifest)
+                except OSError as oe:
+                    fatal(
+                        f"Cloud bundle was created as `{handle}/{actual_slug}`, "
+                        f"but updating spec.yaml failed ({oe}). "
+                        f"Set `cloud.project` to `{new_lit}` manually."
+                    )
+                    return
+                dim(
+                    f"Slug `{slug}` was already taken — using `{actual_slug}`. "
+                    f"Updated `cloud.project` in spec.yaml."
+                )
+            slug = actual_slug
         else:
-            fatal(f"Could not resolve project '{handle}/{slug}': {e}")
-        return
+            # The server returns the same "Bundle not found" body for "doesn't
+            # exist" and "you can't read it" — that's deliberate, so a non-member
+            # can't probe for project existence. Surfacing the two cases the
+            # user can fix themselves keeps the error actionable without
+            # leaking which one applies. (Pending-invite collaborators are by
+            # far the common case in practice — the message intentionally lists
+            # that one first.)
+            detail = ""
+            if isinstance(e.body, dict):
+                d = e.body.get("detail")
+                if isinstance(d, str):
+                    detail = d.lower()
+            if e.status == 400 and "not found" in detail:
+                ui_host = creds.api_base.rstrip("/")
+                fatal(
+                    f"Could not resolve project '{handle}/{slug}': {e}\n"
+                    f"  · If you were invited as a collaborator, accept the invite "
+                    f"at {ui_host} first (sign-in → bundle → invite link), then "
+                    f"re-run `spec push`.\n"
+                    f"  · If `{handle}` is your handle, sign in as that account "
+                    f"and push again — the CLI will create the bundle automatically.\n"
+                    f"  · Otherwise ask the owner to share `{handle}/{slug}`, "
+                    f"or register your own bundle at {ui_host}/{handle}."
+                )
+            else:
+                fatal(f"Could not resolve project '{handle}/{slug}': {e}")
+            return
     project_id = project_info["id"]
+
+    header_target = url_target.raw_url if url_target else f"{handle}/{slug}"
+    git_desc = (
+        f"{git.branch}@{git.commit_sha[:7]}"
+        if git.branch and git.commit_sha
+        else "no-git"
+    )
+    console.print(
+        f"[sf.label]push[/] [bold]{header_target}[/] "
+        f"[sf.muted]· {len(payload)} files · {git_desc}[/]"
+    )
+    for item in payload:
+        dim(f"  {item['path']}")
 
     # Bundle-identity binding (PLAN.md §11). Three flows:
     #

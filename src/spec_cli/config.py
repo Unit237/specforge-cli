@@ -83,6 +83,14 @@ class Manifest:
             self.data["cloud"] = cloud
         cloud["bundle_id"] = bundle_id
 
+    def set_cloud_project(self, project: str) -> None:
+        """Write ``cloud.project`` (bare slug or ``<handle>/<slug>``)."""
+        cloud = self.data.get("cloud")
+        if not isinstance(cloud, dict):
+            cloud = {}
+            self.data["cloud"] = cloud
+        cloud["project"] = project
+
     @property
     def root(self) -> Path:
         return self.path.parent

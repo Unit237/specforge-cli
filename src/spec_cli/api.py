@@ -140,6 +140,21 @@ class CloudClient:
                     pass
             raise
 
+    def create_project(
+        self, name: str, *, description: str | None = None
+    ) -> dict[str, Any]:
+        """Register a new bundle (``POST /api/projects``).
+
+        The server slugifies ``name`` and appends ``-2``, ``-3``, … when
+        the caller already owns a project with that slug — callers should
+        read ``slug`` from the response and reconcile ``cloud.project``.
+        """
+        body: dict[str, Any] = {"name": name.strip()}
+        if description is not None and description.strip():
+            body["description"] = description.strip()
+        raw = self._request("POST", "/api/projects", json=body)
+        return self._as_project_out(raw)
+
     # -- files ---------------------------------------------------------
 
     def list_files(

@@ -37,7 +37,7 @@ from .tools import ALLOWED_TOOL_NAMES, summarize_tool_call
 # rejected with a clear upgrade hint.
 SCHEMA_VERSION: str = "spec.prompts/v0.1"
 
-VALID_SOURCES: frozenset[str] = frozenset({"claude_code", "cursor", "manual"})
+VALID_SOURCES: frozenset[str] = frozenset({"claude_code", "cursor", "codex", "manual"})
 VALID_ROLES: frozenset[str] = frozenset({"user", "assistant"})
 # `tool_result` is reserved — see docs/prompt-format.md. Rejected in v0.1.
 RESERVED_ROLES: frozenset[str] = frozenset({"tool_result"})

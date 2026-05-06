@@ -2,10 +2,11 @@
 Adapters that read captured conversational sessions from coding-agent clients
 and normalize them into `spec_cli.prompts.Session` objects.
 
-Two adapters today:
+Three adapters today:
 
   - ``claude_code`` — reads Claude Code's per-project JSONL store.
   - ``cursor``      — reads Cursor's per-workspace SQLite store.
+  - ``codex``       — reads Codex/Cursor agent transcript JSONL store.
 
 Both adapters expose a ``read_*_sessions(bundle_paths, *, since,
 verbose)`` entry point. ``bundle_paths`` may be a single ``Path`` or
@@ -22,6 +23,12 @@ from .claude_code import (
     encode_bundle_path,
     read_claude_code_sessions,
 )
+from .codex import (
+    CodexError,
+    codex_project_dir,
+    codex_store_root,
+    read_codex_sessions,
+)
 from .cursor import (
     CursorError,
     cursor_global_storage_db,
@@ -31,12 +38,16 @@ from .cursor import (
 
 __all__ = [
     "ClaudeCodeError",
+    "CodexError",
     "CursorError",
     "claude_code_project_dir",
     "claude_code_store_root",
+    "codex_project_dir",
+    "codex_store_root",
     "cursor_global_storage_db",
     "cursor_workspace_storage_root",
     "encode_bundle_path",
     "read_claude_code_sessions",
+    "read_codex_sessions",
     "read_cursor_sessions",
 ]

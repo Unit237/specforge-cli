@@ -67,13 +67,17 @@ from ..prompts.tiers import (
 )
 from ..sources import (
     ClaudeCodeError,
+    CodexError,
     CursorError,
     claude_code_project_dir,
+    claude_code_store_root,
+    codex_project_dir,
+    codex_store_root,
     cursor_workspace_storage_root,
     read_claude_code_sessions,
+    read_codex_sessions,
     read_cursor_sessions,
 )
-from ..sources.claude_code import claude_code_store_root
 from ..stage import (
     historical_bundle_paths,
     load_index,
@@ -624,9 +628,11 @@ def peek_pending_prompt_captures(bundle_root: Path) -> PendingCapturePeek | None
 
         claude_store = claude_code_store_root()
         cursor_store = cursor_workspace_storage_root()
+        codex_store = codex_store_root()
         claude_available = claude_store.exists()
         cursor_available = cursor_store.exists()
-        if not claude_available and not cursor_available:
+        codex_available = codex_store.exists()
+        if not claude_available and not cursor_available and not codex_available:
             return None
 
         git = read_git_context(bundle_root)
@@ -662,6 +668,20 @@ def peek_pending_prompt_captures(bundle_root: Path) -> PendingCapturePeek | None
                     already_counts[session.id] = len(session.turns)
                     new_sessions.append(session)
             except CursorError:
+                return None
+
+        if codex_available:
+            try:
+                for session in read_codex_sessions(
+                    paths_for_lookup, since=None, verbose=False
+                ):
+                    prev = already_counts.get(session.id, 0)
+                    if len(session.turns) <= prev:
+                        continue
+                    new_turn_count += len(session.turns) - prev
+                    already_counts[session.id] = len(session.turns)
+                    new_sessions.append(session)
+            except CodexError:
                 return None
 
         if not new_sessions:
@@ -715,9 +735,11 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
 
     claude_store = claude_code_store_root()
     cursor_store = cursor_workspace_storage_root()
+    codex_store = codex_store_root()
     claude_available = claude_store.exists()
     cursor_available = cursor_store.exists()
-    if not claude_available and not cursor_available:
+    codex_available = codex_store.exists()
+    if not claude_available and not cursor_available and not codex_available:
         return None
 
     git = read_git_context(bundle_root)
@@ -750,6 +772,18 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
                 already_counts[session.id] = len(session.turns)
                 discovered.append(session)
         except CursorError:
+            return None
+
+    if codex_available:
+        try:
+            for session in read_codex_sessions(
+                paths_for_lookup, since=None, verbose=True
+            ):
+                if not _session_has_new_turns(session, already_counts):
+                    continue
+                already_counts[session.id] = len(session.turns)
+                discovered.append(session)
+        except CodexError:
             return None
 
     if not discovered:
@@ -825,9 +859,11 @@ def run_capture_for_pre_commit_hook(
 
         claude_store = claude_code_store_root()
         cursor_store = cursor_workspace_storage_root()
+        codex_store = codex_store_root()
         claude_available = claude_store.exists()
         cursor_available = cursor_store.exists()
-        if not claude_available and not cursor_available:
+        codex_available = codex_store.exists()
+        if not claude_available and not cursor_available and not codex_available:
             return
 
         git = read_git_context(bundle_root)
@@ -861,6 +897,18 @@ def run_capture_for_pre_commit_hook(
                     already_counts[session.id] = len(session.turns)
                     discovered.append(session)
             except CursorError:
+                return
+
+        if codex_available:
+            try:
+                for session in read_codex_sessions(
+                    paths_for_lookup, since=None, verbose=True
+                ):
+                    if not _session_has_new_turns(session, already_counts):
+                        continue
+                    already_counts[session.id] = len(session.turns)
+                    discovered.append(session)
+            except CodexError:
                 return
 
         if not discovered:
@@ -965,9 +1013,9 @@ def prompts_group() -> None:
 @prompts_group.command("capture")
 @click.option(
     "--source",
-    type=click.Choice(["claude_code", "cursor", "all"], case_sensitive=False),
+    type=click.Choice(["claude_code", "cursor", "codex", "all"], case_sensitive=False),
     default="all",
-    help="Restrict capture to one source (claude_code, cursor) or read both with `all`.",
+    help="Restrict capture to one source (claude_code, cursor, codex) or read all.",
 )
 @click.option(
     "--since",
@@ -1010,8 +1058,8 @@ def capture_cmd(
 ) -> None:
     """Snapshot every new conversational session into one `.prompts` file.
 
-    Only reads the Claude Code store folder for *this* bundle (see
-    ``~/.claude/projects/<encoded-path>``); other repos are not included.
+    Reads local coding-agent stores for *this* bundle only (Claude Code,
+    Cursor, and Codex when available); other repos are not included.
     The first time you run capture, every session in that folder that has
     not yet been written to a ``.prompts`` file is included, which can be
     many. Use ``--max-sessions`` or ``--since`` to cap the batch.
@@ -1054,19 +1102,22 @@ def capture_cmd(
     paths_for_lookup = historical_bundle_paths(root)
 
     requested = source.lower()
-    if requested not in ("claude_code", "cursor", "all"):
+    if requested not in ("claude_code", "cursor", "codex", "all"):
         fatal(f"Unknown source `{source}`.")
         return
     want_claude = requested in ("claude_code", "all")
     want_cursor = requested in ("cursor", "all")
+    want_codex = requested in ("codex", "all")
 
     # Probe each requested store. Missing stores aren't errors when
     # `--source all` is the default — a user with only Cursor (or only
     # Claude Code) installed should still be able to capture.
     claude_store = claude_code_store_root()
     cursor_store = cursor_workspace_storage_root()
+    codex_store = codex_store_root()
     claude_available = want_claude and claude_store.exists()
     cursor_available = want_cursor and cursor_store.exists()
+    codex_available = want_codex and codex_store.exists()
 
     if requested == "claude_code" and not claude_available:
         dim(f"Claude Code store not found at {claude_store}.")
@@ -1077,11 +1128,16 @@ def capture_cmd(
         dim(f"Cursor workspace store not found at {cursor_store}.")
         info("Open this bundle in Cursor and chat at least once, then re-run `spec prompts capture`.")
         return
-    if not claude_available and not cursor_available:
+    if requested == "codex" and not codex_available:
+        dim(f"Codex transcript store not found at {codex_store}.")
+        info("Open this bundle in Codex/Cursor agent mode and chat at least once, then re-run `spec prompts capture`.")
+        return
+    if not claude_available and not cursor_available and not codex_available:
         dim("No coding-agent stores found on this machine.")
         dim(f"  Claude Code: {claude_store}")
         dim(f"  Cursor:      {cursor_store}")
-        info("Install Claude Code or Cursor, start a session, then re-run.")
+        dim(f"  Codex:       {codex_store}")
+        info("Install Claude Code/Cursor/Codex, start a session, then re-run.")
         return
 
     # Capture context: git state + user identity. `read_git_context` fails
@@ -1125,6 +1181,19 @@ def capture_cmd(
             fatal(str(e))
             return
 
+    if codex_available:
+        try:
+            for session in read_codex_sessions(
+                paths_for_lookup, since=since_dt, verbose=capture_text
+            ):
+                if not _session_has_new_turns(session, already_counts):
+                    continue
+                already_counts[session.id] = len(session.turns)
+                discovered.append(session)
+        except CodexError as e:
+            fatal(str(e))
+            return
+
     if not discovered:
         dim("No new sessions to capture.")
         return
@@ -1158,6 +1227,8 @@ def capture_cmd(
             )
         if cursor_available:
             dim(f"Cursor workspace store: {cursor_store}")
+        if codex_available:
+            dim(f"Codex transcript store for this bundle: {codex_project_dir(root)}")
 
     # Tag each session with who drove it. With git identity alone this is
     # a best guess; when credentials are linked to Cloud, the username is

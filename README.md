@@ -75,6 +75,10 @@ files is preserved). Skip Spec upload on push with `SKIP_SPEC_PUSH=1`, or skip
 all hooks with `git push --no-verify`. Multi-bundle monorepos: set
 `SPEC_BUNDLE_ROOT` to the bundle directory.
 
+On first push to your own handle, `spec push` creates the Cloud bundle if it
+does not exist yet (the server may suffix the slug — `my-app-2`, etc. — and
+the CLI updates `cloud.project` in `spec.yaml` when that happens).
+
 Semantics (capture timing, disk vs. last `spec add`, auxiliary Markdown): see the
 Spec docs bundle (`docs/index.html`, Review section — Git hooks).
 
