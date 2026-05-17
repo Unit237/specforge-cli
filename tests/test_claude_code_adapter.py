@@ -495,3 +495,26 @@ def test_read_sessions_keeps_session_without_cwd_in_exact_dir(tmp_path, monkeypa
     sessions = list(read_claude_code_sessions(bundle))
     assert len(sessions) == 1
     assert sessions[0].id == session_id
+
+
+def test_read_sessions_accepts_ancestor_cwd_parent_folder(tmp_path, monkeypatch):
+    """Claude Code launched from a parent folder that contains the bundle."""
+    parent = tmp_path / "wrapper"
+    bundle = parent / "spec"
+    bundle.mkdir(parents=True)
+
+    session_id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
+    rows = [
+        {
+            "type": "user",
+            "cwd": str(parent.resolve()),
+            "sessionId": session_id,
+            "timestamp": "2026-03-10T16:00:00Z",
+            "message": {"role": "user", "content": "tweak the spec bundle"},
+        },
+    ]
+    _make_fake_store(tmp_path, bundle, session_id, rows)
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
+
+    sessions = list(read_claude_code_sessions(bundle))
+    assert [s.id for s in sessions] == [session_id]

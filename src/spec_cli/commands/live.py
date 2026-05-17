@@ -44,6 +44,11 @@ from ..realtime import (
     watch_log_path,
     watch_pid_path,
 )
+from ..realtime.live_doctor import (
+    LiveDoctorFinding,
+    diagnose_live_health,
+    resolve_bundle_root_for_doctor,
+)
 from ..ui import console, dim, fatal, info, ok, warn
 
 
@@ -80,6 +85,7 @@ def live_group() -> None:
       spec live stop          — stop it
       spec live restart       — stop + start
       spec live status        — show daemon state + resolved settings
+      spec live doctor        — diagnose watcher path / log / mapping issues
 
     \b
     Per-bundle policy (committed to spec.yaml):
@@ -481,6 +487,53 @@ def live_status_cmd() -> None:
             + (" (machine mute)" if prefs.prompt_stream_muted else " (bundle off)")
         )
     dim("  receiving:              always available to project members.")
+
+
+@live_group.command("doctor")
+def live_doctor_cmd() -> None:
+    """Diagnose Spec Live wiring for the bundle at this cwd.
+
+    Checks ``watch.pid`` vs the resolved bundle root, log freshness,
+    stray ``.spec`` state under old paths, and whether Cursor sessions
+    map to this bundle. The background watcher runs the same checks
+    automatically after ~5 minutes without a successful prompt POST.
+    """
+    try:
+        root = resolve_bundle_root_for_doctor()
+    except BundleNotFoundError as e:
+        fatal(str(e))
+        return
+
+    findings = diagnose_live_health(root)
+    console.print("[sf.label]Spec Live doctor[/]")
+    dim(f"  bundle root:  {root.resolve()}")
+
+    exit_code = 0
+    for f in findings:
+        _print_doctor_finding(f)
+        if f.severity == "error":
+            exit_code = 2
+        elif f.severity == "warn" and exit_code == 0:
+            exit_code = 1
+
+    if exit_code:
+        dim("  → Fix the items above, then run `spec live restart`.")
+    raise SystemExit(exit_code)
+
+
+def _print_doctor_finding(f: LiveDoctorFinding) -> None:
+    if f.severity == "ok" or f.code == "ok":
+        ok(f"  {f.summary}")
+        return
+    if f.severity == "error":
+        warn(f"  {f.summary}")
+    else:
+        warn(f"  {f.summary}")
+    if f.detail:
+        for line in f.detail.splitlines():
+            dim(f"    {line}")
+    if f.fix:
+        dim(f"    → {f.fix}")
 
 
 def _has_explicit_prompt_stream(manifest: Manifest) -> bool:

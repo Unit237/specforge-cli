@@ -33,9 +33,9 @@ The wrappers are deliberately conservative:
   successful ``clone``, may run ``spec bundle doctor`` inside the new
   tree (see ``SPEC_NO_CLONE_DOCTOR``). Preserves git's exit code.
 * Autostart hook walks up for ``spec.yaml`` first (fast path). When
-  that misses but ``cwd`` is inside a git monorepo with a tracked
-  bundle, it falls back to ``spec bundle root --quiet`` — same
-  discovery as ``spec watch``. Outside any bundle both paths are
+  that misses, it falls back to ``spec bundle root --quiet`` — same
+  discovery as ``spec watch`` (git-tracked monorepo bundles, or a
+  nested bundle under a parent cwd). Outside any bundle both paths are
   cheap no-ops.
 * Both fall back gracefully if the ``spec`` binary is missing.
 """
@@ -157,7 +157,8 @@ git() {{
 }}
 
 # Resolve bundle root: walk up for spec.yaml, then ask the CLI for
-# git-tracked discovery (monorepo parent cwd). Prints one path or
+# git-tracked + descendant discovery (monorepo / wrapper parent cwd).
+# Prints one path or
 # nothing. Bounded at $HOME — pure POSIX, no GNU-isms.
 __spec_find_bundle_root() {{
   local __spec_dir="$PWD"

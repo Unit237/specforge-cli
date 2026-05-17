@@ -53,6 +53,19 @@ def test_bundle_root_quiet_missing_bundle(tmp_path: Path) -> None:
     assert proc.stdout.strip() == ""
 
 
+def test_bundle_root_quiet_descendant_wrapper_layout(tmp_path: Path) -> None:
+    wrapper = tmp_path / "parent"
+    bundle = wrapper / "spec"
+    bundle.mkdir(parents=True)
+    (bundle / "spec.yaml").write_text(
+        yaml.safe_dump({"schema": "spec/v0.1", "name": "nested"}),
+        encoding="utf-8",
+    )
+    proc = _run_bundle_root(wrapper, quiet=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == str(bundle.resolve())
+
+
 def test_bundle_root_honors_spec_bundle_root(tmp_path: Path) -> None:
     a = tmp_path / "a"
     b = tmp_path / "b"

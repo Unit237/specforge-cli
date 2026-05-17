@@ -177,8 +177,9 @@ def bundle_root_cmd(quiet: bool) -> None:
     """Print the Spec bundle root for the current working directory.
 
     Uses the same resolution as ``spec watch``: walk up for ``spec.yaml``,
-    honor ``SPEC_BUNDLE_ROOT``, then discover git-tracked bundles in a
-    monorepo. Shell autostart calls this when the walk-up finds nothing.
+    honor ``SPEC_BUNDLE_ROOT``, discover git-tracked bundles in a monorepo,
+    then scan descendants when cwd is a parent of a nested bundle. Shell
+    autostart calls this when the walk-up finds nothing.
     """
     try:
         root = find_bundle_root()
@@ -200,7 +201,8 @@ def bundle_doctor_cmd(local_only: bool) -> None:
     """Show ``spec.yaml`` identity, git alignment, and cloud linkage.
 
     Resolves the bundle from ``cwd`` the same way as ``spec watch`` (walk-up,
-    ``SPEC_BUNDLE_ROOT``, or git-tracked ``spec.yaml`` in a monorepo). When
+    ``SPEC_BUNDLE_ROOT``, git-tracked ``spec.yaml`` in a monorepo, or a
+    descendant bundle when cwd is a wrapper folder). When
     logged in, asks Cloud whether your account can access ``cloud.project`` —
     the usual blocker for team clones before ``spec team watch`` / ``spec watch``.
 

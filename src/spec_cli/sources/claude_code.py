@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from ..bundle_scope import path_intersects_bundle
 from ..prompts.schema import (
     MAX_TURN_MODEL_CHARS,
     MAX_TURN_TEXT_CHARS,
@@ -408,13 +409,17 @@ def _session_dir_candidates(bundle_root: Path) -> list[Path]:
 def _session_belongs_to_any(
     session: Session, resolved_roots: list[Path], *, strict_cwd: bool
 ) -> bool:
-    """Is this session's recorded ``cwd`` inside *any* of the given roots?
+    """Is this session's recorded ``cwd`` related to *any* of the given roots?
 
     This is the defense-in-depth check that makes prompt scoping match
     git scoping. A session's ``cwd`` is recorded by Claude Code on
     every JSONL row; we read it during session assembly and compare
     it here against the union of roots the bundle has ever lived at
     (current path + historical aliases — see Fix #2).
+
+    Accepts the bundle root, any subdirectory, or a bounded ancestor
+    (parent folder / monorepo root) — same rules as
+    :func:`bundle_scope.path_intersects_bundle`.
 
     ``strict_cwd``:
       - ``False``  — the session file lived in one bundle-root's
@@ -432,12 +437,8 @@ def _session_belongs_to_any(
     candidate = Path(raw)
     if not candidate.is_absolute():
         return False
-    try:
-        resolved = candidate.resolve()
-    except OSError:
-        return False
     for root in resolved_roots:
-        if resolved == root or root in resolved.parents:
+        if path_intersects_bundle(candidate, root):
             return True
     return False
 
@@ -458,7 +459,8 @@ def read_claude_code_sessions(
     so a moved bundle still finds its old sessions (Fix #2).
 
     Scope mirrors git: a session counts if Claude Code was launched in
-    *any* recorded bundle root or any subdirectory of one. We discover
+    *any* recorded bundle root, a subdirectory, or a bounded ancestor
+    folder that contains the bundle. We discover
     candidate project directories by encoded-name prefix and then drop
     any session whose recorded ``cwd`` is outside every recorded root
     (defense-in-depth against Claude Code's lossy path encoding).

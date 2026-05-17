@@ -69,6 +69,7 @@ from .presence import (
     compute_local_presence,
 )
 from .presence_mirror import TeamPresenceMirror
+from .live_doctor import QUIET_PROMPT_POST_SECS, emit_live_doctor_warnings
 from .tracker import LiveCursor
 from .transport import (
     HTTPPoster,
@@ -463,6 +464,7 @@ def run_watcher(
         notifier.announce_broadcast_disabled()
     else:
         _spec_live_startup_snapshot(bundle_root)
+        emit_live_doctor_warnings(bundle_root)
 
     if stop_event is None:
         stop_event = threading.Event()
@@ -649,6 +651,8 @@ def run_watcher(
     # hooks see a fresh file quickly; peers still expire on schedule.
     last_team_presence_tick = time.monotonic() - DEFAULT_TEAM_PRESENCE_TICK_SECS
     last_presence_fingerprint = ""
+    last_prompt_post_mono = time.monotonic()
+    last_doctor_mono = 0.0
     # Prime the mirror with one local snapshot so ``self`` (branch +
     # dirty files) exists before the first 15s presence POST tick.
     try:
@@ -669,7 +673,7 @@ def run_watcher(
             tick_started = time.monotonic()
             if poster is not None:
                 try:
-                    _producer_tick(
+                    posted = _producer_tick(
                         bundle_root=bundle_root,
                         cursor=cursor,
                         poster=poster,
@@ -678,10 +682,21 @@ def run_watcher(
                         assistant_tail_holds=assistant_tail_holds,
                         last_assistant_cloud_ids=last_assistant_cloud_ids,
                     )
+                    if posted > 0:
+                        last_prompt_post_mono = time.monotonic()
                 except Exception as e:  # noqa: BLE001
                     log.warning("spec-live: producer tick error: %s", e)
 
             now = time.monotonic()
+
+            if (
+                opts.broadcast
+                and poster is not None
+                and now - last_prompt_post_mono >= QUIET_PROMPT_POST_SECS
+                and now - last_doctor_mono >= QUIET_PROMPT_POST_SECS
+            ):
+                emit_live_doctor_warnings(bundle_root)
+                last_doctor_mono = now
 
             # Presence broadcast — gated by `presence_enabled` so a
             # user who muted Spec Live entirely doesn't ship presence
@@ -891,8 +906,10 @@ def _producer_tick(
     stop_event: threading.Event,
     assistant_tail_holds: dict[str, _AssistantTailHold] | None = None,
     last_assistant_cloud_ids: dict[str, int] | None = None,
-) -> None:
+) -> int:
     """One pass over local transcripts; broadcast new turns.
+
+    Returns the number of prompt turns successfully POSTed this tick.
 
     Sessions come from Cursor, Claude Code, and Codex adapters in
     ``_iter_local_sessions`` — tail-assistant streaming and empty-tail
@@ -910,15 +927,16 @@ def _producer_tick(
     a fresh ``spec watch`` against a long-quiet bundle could spend
     minutes ignoring the user's Ctrl+C.
     """
+    posted_count = 0
     if stop_event.is_set():
-        return
+        return posted_count
     git = read_git_context(bundle_root)
     branch = git.branch or "detached"
     if (
         opts.project_branch_filter
         and opts.project_branch_filter != branch
     ):
-        return  # outside the filter — skip this tick entirely
+        return posted_count  # outside the filter — skip this tick entirely
     paths = historical_bundle_paths(bundle_root)
     holds = assistant_tail_holds if assistant_tail_holds is not None else {}
     cloud_ids = (
@@ -927,7 +945,7 @@ def _producer_tick(
 
     for session in _iter_local_sessions(paths):
         if stop_event.is_set():
-            return
+            return posted_count
         prev = cursor.turns_broadcast_for(session.id)
         # Cursor (and other adapters) can shrink on-disk turn lists while
         # our cursor still counts empty skips we advanced past without a
@@ -952,7 +970,7 @@ def _producer_tick(
 
         for offset, turn in enumerate(new_turns):
             if stop_event.is_set():
-                return
+                return posted_count
             event = _build_outgoing(session, turn, branch=branch, git=git, opts=opts)
             if event is None:
                 # Retry empty / undeliverable slots — do not advance the
@@ -1017,6 +1035,8 @@ def _producer_tick(
                 continue
 
             ok, created_id = poster.send(event)
+            if ok:
+                posted_count += 1
             if not ok:
                 now_m = time.monotonic()
                 if now_m - _POST_FAILURE_WARN_MONO[0] >= 60.0:
@@ -1065,6 +1085,8 @@ def _producer_tick(
                 )
 
         cursor.clamp_broadcast(session.id, len(session.turns))
+
+    return posted_count
 
 
 def _iter_local_sessions(paths) -> Iterable[Session]:  # type: ignore[no-untyped-def]

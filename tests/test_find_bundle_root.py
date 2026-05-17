@@ -1,4 +1,4 @@
-"""``find_bundle_root`` — SPEC_BUNDLE_ROOT, walk-up, and git-tracked discovery."""
+"""``find_bundle_root`` — walk-up, git-tracked, and descendant discovery."""
 
 from __future__ import annotations
 
@@ -69,5 +69,48 @@ def test_find_bundle_root_multiple_bundles_no_spec_pref_raises(
         _git(repo, "add", f"{name}/spec.yaml")
     _git(repo, "commit", "-m", "init")
     os.chdir(repo)
+    with pytest.raises(BundleNotFoundError, match="SPEC_BUNDLE_ROOT"):
+        find_bundle_root()
+
+
+def test_find_bundle_root_descendant_wrapper_layout(tmp_path: Path) -> None:
+    """Parent cwd with bundle in ``<parent>/spec/`` (outside any git repo)."""
+    wrapper = tmp_path / "lightreach-io" / "spec"
+    bundle = wrapper / "spec"
+    bundle.mkdir(parents=True)
+    (bundle / "spec.yaml").write_text(
+        yaml.safe_dump({"schema": "spec/v0.1", "name": "nested"}),
+        encoding="utf-8",
+    )
+    os.chdir(wrapper)
+    assert find_bundle_root().resolve() == bundle.resolve()
+
+
+def test_find_bundle_root_descendant_prefers_spec_child(tmp_path: Path) -> None:
+    wrapper = tmp_path / "mono"
+    wrapper.mkdir()
+    a = wrapper / "spec"
+    b = wrapper / "other" / "bundle"
+    for d in (a, b):
+        d.mkdir(parents=True)
+        (d / "spec.yaml").write_text(
+            yaml.safe_dump({"schema": "spec/v0.1", "name": d.name}),
+            encoding="utf-8",
+        )
+    os.chdir(wrapper)
+    assert find_bundle_root().resolve() == a.resolve()
+
+
+def test_find_bundle_root_descendant_multiple_ambiguous_raises(tmp_path: Path) -> None:
+    wrapper = tmp_path / "mono"
+    wrapper.mkdir()
+    for name in ("alpha", "beta"):
+        d = wrapper / name
+        d.mkdir()
+        (d / "spec.yaml").write_text(
+            yaml.safe_dump({"schema": "spec/v0.1", "name": name}),
+            encoding="utf-8",
+        )
+    os.chdir(wrapper)
     with pytest.raises(BundleNotFoundError, match="SPEC_BUNDLE_ROOT"):
         find_bundle_root()

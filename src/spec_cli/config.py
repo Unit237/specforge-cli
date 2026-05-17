@@ -16,9 +16,11 @@ Reads/writes the two config surfaces the CLI owns:
      when present.
 
 Everything path-related is resolved from the bundle root, which we find by
-walking up from cwd (or ``SPEC_BUNDLE_ROOT``), and — when inside a git repo
+walking up from cwd (or ``SPEC_BUNDLE_ROOT``), — when inside a git repo
 without a parent ``spec.yaml`` — by discovering tracked bundle manifests
-under the worktree (same rules as git hooks).
+under the worktree (same rules as git hooks), and — when cwd is a parent
+of a nested bundle (wrapper checkout) — by scanning descendants for
+``spec.yaml``.
 """
 
 from __future__ import annotations
@@ -341,6 +343,141 @@ def discover_bundle_roots_under_git_root(git_root: Path) -> list[Path]:
     return sorted(roots, key=lambda p: str(p))
 
 
+# Descendant scan: skip heavy / irrelevant dirs (performance + false positives).
+_BUNDLE_DESCEND_SKIP_DIR_NAMES: frozenset[str] = frozenset(
+    {
+        ".git",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        "dist",
+        "build",
+        ".next",
+        ".turbo",
+        "out",
+        ".spec",
+    }
+)
+
+_DEFAULT_BUNDLE_DESCEND_MAX_DEPTH = 8
+
+
+def _bundle_descend_max_depth() -> int:
+    raw = os.environ.get("SPEC_BUNDLE_DESCEND_MAX_DEPTH", "").strip()
+    if not raw:
+        return _DEFAULT_BUNDLE_DESCEND_MAX_DEPTH
+    try:
+        depth = int(raw)
+    except ValueError:
+        return _DEFAULT_BUNDLE_DESCEND_MAX_DEPTH
+    return max(1, min(depth, 32))
+
+
+def discover_bundle_roots_under_cwd(
+    start: Path,
+    *,
+    max_depth: int | None = None,
+) -> list[Path]:
+    """Bundle roots with a valid ``spec.yaml`` somewhere under ``start``.
+
+    Does not search above ``start``. Used when the shell cwd is a wrapper
+    folder that contains a nested Spec bundle (e.g. ``~/project/spec/`` with
+    the manifest at ``~/project/spec/spec/spec.yaml``).
+    """
+    here = start.resolve()
+    limit = max_depth if max_depth is not None else _bundle_descend_max_depth()
+    found: list[Path] = []
+    seen: set[Path] = set()
+
+    def _record(directory: Path) -> None:
+        manifest = directory / MANIFEST_FILENAME
+        if not manifest.is_file() or not _is_bundle_manifest_file(manifest):
+            return
+        root = directory.resolve()
+        if root in seen:
+            return
+        seen.add(root)
+        found.append(root)
+
+    def _walk(directory: Path, depth: int) -> None:
+        if depth > limit:
+            return
+        _record(directory)
+        # Do not descend into a directory that is already a bundle root —
+        # bundle content (docs/, prompts/) is not another bundle.
+        if (directory / MANIFEST_FILENAME).is_file():
+            return
+        try:
+            children = sorted(directory.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return
+        for child in children:
+            if not child.is_dir():
+                continue
+            if child.name in _BUNDLE_DESCEND_SKIP_DIR_NAMES:
+                continue
+            _walk(child, depth + 1)
+
+    _walk(here, 0)
+    return sorted(found, key=lambda p: (len(p.parts), str(p)))
+
+
+def _prefer_bundle_root(
+    candidates: list[Path],
+    here: Path,
+    *,
+    git_root: Path | None = None,
+) -> Path:
+    """Pick one bundle when several manifests match the same cwd context."""
+    unique = []
+    seen: set[Path] = set()
+    for c in candidates:
+        r = c.resolve()
+        if r not in seen:
+            seen.add(r)
+            unique.append(r)
+    if len(unique) == 1:
+        return unique[0]
+    if git_root is not None:
+        preferred = (git_root / "spec").resolve()
+        if preferred in unique:
+            return preferred
+    spec_child = (here.resolve() / "spec").resolve()
+    if spec_child in unique:
+        return spec_child
+
+    here_res = here.resolve()
+
+    def _depth_from_here(bundle: Path) -> tuple[int, str]:
+        try:
+            rel = bundle.relative_to(here_res)
+            return (len(rel.parts), str(bundle))
+        except ValueError:
+            return (9999, str(bundle))
+
+    shallowest = min(_depth_from_here(b) for b in unique)[0]
+    tied = [b for b in unique if _depth_from_here(b)[0] == shallowest]
+    if len(tied) == 1:
+        return tied[0]
+    rels: list[str] = []
+    for b in tied[:8]:
+        try:
+            rels.append(str(b.relative_to(here_res)))
+        except ValueError:
+            rels.append(str(b))
+    tail = "…" if len(tied) > 8 else ""
+    listed = ", ".join(rels) + tail
+    raise BundleNotFoundError(
+        f"Multiple Spec bundles under {here} ({listed}). "
+        f"Export SPEC_BUNDLE_ROOT to the bundle directory you want, then retry."
+    )
+
+
 def find_bundle_root(start: Path | None = None) -> Path:
     """Resolve the bundle directory containing ``spec.yaml``.
 
@@ -351,9 +488,12 @@ def find_bundle_root(start: Path | None = None) -> Path:
     2. Walk upward from ``start`` / the current working directory until a
        ``spec.yaml`` is found (classic single-bundle layout).
     3. If still missing, use the git worktree root and scan **tracked**
-       ``spec.yaml`` files (same discovery as git hooks). Exactly one match
-       wins; several matches prefer ``<repo>/spec`` when present; otherwise
-       raises with a hint to set ``SPEC_BUNDLE_ROOT``.
+       ``spec.yaml`` files (same discovery as git hooks).
+    4. If still missing, scan **descendants** of ``cwd`` for ``spec.yaml``
+       (parent-folder / wrapper checkout layouts).
+    5. When step 3 or 4 finds several bundles, prefer ``<repo>/spec`` or
+       ``<cwd>/spec`` when present; otherwise the shallowest match; else
+       raise with a hint to set ``SPEC_BUNDLE_ROOT``.
     """
     here = (start or Path.cwd()).resolve()
 
@@ -375,23 +515,16 @@ def find_bundle_root(start: Path | None = None) -> Path:
     gt = repo_toplevel(here)
     if gt is not None:
         roots = discover_bundle_roots_under_git_root(gt)
-        if len(roots) == 1:
-            return roots[0]
-        if len(roots) > 1:
-            preferred = (gt / "spec").resolve()
-            if preferred in roots:
-                return preferred
-            rels = [str(r.relative_to(gt)) for r in roots[:8]]
-            tail = "…" if len(roots) > 8 else ""
-            listed = ", ".join(rels) + tail
-            raise BundleNotFoundError(
-                f"No {MANIFEST_FILENAME} in parents of {here}; this git repo has "
-                f"multiple bundles ({listed}). "
-                f"Export SPEC_BUNDLE_ROOT to the bundle directory you want, then retry."
-            )
+        if roots:
+            return _prefer_bundle_root(roots, here, git_root=gt)
+
+    descend = discover_bundle_roots_under_cwd(here)
+    if descend:
+        return _prefer_bundle_root(descend, here, git_root=gt)
 
     raise BundleNotFoundError(
-        f"No {MANIFEST_FILENAME} found in {here} or any parent. "
+        f"No {MANIFEST_FILENAME} found in {here}, any parent, or descendants "
+        f"(depth ≤ {_bundle_descend_max_depth()}). "
         "Run `spec init` to scaffold one, or `cd` into the bundle directory."
     )
 

@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from ..bundle_scope import path_intersects_bundle
 from ..prompts.schema import (
     MAX_TURN_MODEL_CHARS,
     MAX_TURN_TEXT_CHARS,
@@ -511,27 +512,10 @@ def _build_codex_rollout_session(
 def _path_intersects_bundle(cwd: str | None, bundle_paths: Iterable[Path]) -> bool:
     if not cwd:
         return False
-    try:
-        c = Path(cwd).expanduser().resolve()
-    except OSError:
-        return False
+    candidate = Path(cwd)
     for root in bundle_paths:
-        try:
-            r = root.resolve()
-        except OSError:
-            continue
-        if c == r:
+        if path_intersects_bundle(candidate, root):
             return True
-        try:
-            c.relative_to(r)
-            return True
-        except ValueError:
-            pass
-        try:
-            r.relative_to(c)
-            return True
-        except ValueError:
-            pass
     return False
 
 
