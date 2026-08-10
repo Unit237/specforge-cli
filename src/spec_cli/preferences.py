@@ -10,7 +10,8 @@ Shape (small, forward-compat — unknown keys are preserved verbatim):
     {
       "schema": 1,
       "prompt_stream": "default" | "muted",
-      "autostart":     "default" | "off"
+      "autostart":     "default" | "off",
+      "bundles":       ["/absolute/path/to/a/spec/bundle"]
     }
 
 Why JSON, not YAML: the credentials file already uses JSON, so users
@@ -31,6 +32,10 @@ The current keys:
   ``spec watch`` on this machine. Set by ``spec live autostart off``.
   Default is ``"default"`` (autostart on whenever the user enters a
   ``spec init``'d bundle in an interactive shell).
+
+* ``bundles`` — absolute roots of Spec bundles seen on this machine. This is
+  the small local registry used by the machine-wide ``spec on`` / ``spec off``
+  workday switch. Missing paths are ignored and pruned on the next switch.
 
 Atomic writes (write-temp + rename) and tolerant reads (missing or
 malformed file = defaults). Same hygiene as ``LiveCursor`` so a kill
@@ -74,9 +79,12 @@ class Preferences:
 
     prompt_stream: str = "default"  # "default" | "muted"
     autostart: str = "default"  # "default" | "off"
+    bundles: list[str] = None  # type: ignore[assignment]
     raw: dict = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
+        if self.bundles is None:
+            self.bundles = []
         if self.raw is None:
             self.raw = {}
 
@@ -128,7 +136,13 @@ class Preferences:
             au = autostart_raw
         else:
             au = "default"
-        return cls(prompt_stream=ps, autostart=au, raw=data)
+        bundles_raw = data.get("bundles")
+        bundles: list[str] = []
+        if isinstance(bundles_raw, list):
+            for value in bundles_raw:
+                if isinstance(value, str) and value and value not in bundles:
+                    bundles.append(value)
+        return cls(prompt_stream=ps, autostart=au, bundles=bundles, raw=data)
 
     # ── writes ────────────────────────────────────────────────
 
@@ -144,6 +158,7 @@ class Preferences:
         merged["schema"] = PREFERENCES_SCHEMA_VERSION
         merged["prompt_stream"] = self.prompt_stream
         merged["autostart"] = self.autostart
+        merged["bundles"] = list(dict.fromkeys(self.bundles))
 
         tmp_fd, tmp_name = tempfile.mkstemp(
             prefix=f"{PREFERENCES_FILENAME}.",
@@ -180,9 +195,24 @@ def load_preferences() -> Preferences:
     return Preferences.load()
 
 
+def remember_bundle(bundle_root: Path) -> Preferences:
+    """Add a bundle root to this machine's workday registry.
+
+    Idempotent and intentionally tiny: commands call this only after normal
+    bundle discovery has already proved the path is a Spec bundle.
+    """
+    root = str(bundle_root.expanduser().resolve())
+    prefs = load_preferences()
+    if root not in prefs.bundles:
+        prefs.bundles.append(root)
+        prefs.save()
+    return prefs
+
+
 __all__ = [
     "PREFERENCES_FILENAME",
     "PREFERENCES_SCHEMA_VERSION",
     "Preferences",
     "load_preferences",
+    "remember_bundle",
 ]

@@ -17,6 +17,7 @@ def _bundle(tmp_path):
 
 
 def test_upgrade_rules_appends_agents_coordination_without_overwriting(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
     root = _bundle(tmp_path)
     agents = root / "AGENTS.md"
     agents.write_text("# Team instructions\n\nKeep this text.\n", encoding="utf-8")
@@ -38,6 +39,7 @@ def test_upgrade_rules_appends_agents_coordination_without_overwriting(tmp_path,
 
 
 def test_upgrade_rules_creates_agents_coordination_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
     root = _bundle(tmp_path)
     monkeypatch.chdir(root)
 

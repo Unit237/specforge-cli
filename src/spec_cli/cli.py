@@ -26,6 +26,7 @@ from .commands.team import team_cmd
 from .commands.unstage import unstage_cmd
 from .commands.status import status_cmd
 from .commands.watch import watch_cmd
+from .commands.workday import workday_off_cmd, workday_on_cmd
 
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": 100}
@@ -66,6 +67,8 @@ cli.add_command(locks_group)
 cli.add_command(live_group)
 cli.add_command(presence_group)
 cli.add_command(hooks_group)
+cli.add_command(workday_on_cmd)
+cli.add_command(workday_off_cmd)
 
 
 def main() -> None:
