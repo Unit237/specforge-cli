@@ -15,7 +15,11 @@ from spec_cli.realtime.active_edits import ActiveEditsStore
 def _bundle(tmp_path: Path) -> Path:
     root = tmp_path / "bundle"
     root.mkdir()
-    (root / "spec.yaml").write_text("name: demo\n", encoding="utf-8")
+    (root / "spec.yaml").write_text(
+        'schema: "spec/v0.1"\nname: demo\ncloud:\n'
+        '  project: jon/demo\n  bundle_id: bdl_demo\n',
+        encoding="utf-8",
+    )
     (root / "AGENTS.md").write_text(
         "<!-- >>> spec live coordination >>>\n",
         encoding="utf-8",
@@ -34,7 +38,8 @@ def _named_bundle(parent: Path, name: str) -> Path:
     root = parent / name
     root.mkdir()
     (root / "spec.yaml").write_text(
-        f'schema: "spec/v0.1"\nname: {name}\n',
+        f'schema: "spec/v0.1"\nname: {name}\ncloud:\n'
+        f'  project: jon/{name}\n  bundle_id: bdl_{name}\n',
         encoding="utf-8",
     )
     return root
@@ -92,6 +97,7 @@ def test_spec_on_enables_preferences_registers_current_and_starts(
         "spec_cli.commands.workday.load_credentials",
         lambda: SimpleNamespace(access_token="token"),
     )
+    monkeypatch.setattr("spec_cli.commands.workday._cloud_login_error", lambda _c: None)
     monkeypatch.setattr("spec_cli.commands.workday.start_in_background", fake_start)
 
     result = CliRunner().invoke(cli, ["on"])
@@ -116,6 +122,7 @@ def test_spec_on_from_workspace_registers_all_peer_bundles(tmp_path, monkeypatch
         "spec_cli.commands.workday.load_credentials",
         lambda: SimpleNamespace(access_token="token"),
     )
+    monkeypatch.setattr("spec_cli.commands.workday._cloud_login_error", lambda _c: None)
     monkeypatch.setattr(
         "spec_cli.commands.workday.start_in_background",
         lambda root: (
@@ -134,6 +141,59 @@ def test_spec_on_from_workspace_registers_all_peer_bundles(tmp_path, monkeypatch
     assert result.exit_code == 0, result.output
     assert started == [first.resolve(), second.resolve()]
     assert load_preferences().bundles == [str(first.resolve()), str(second.resolve())]
+
+
+def test_spec_on_registers_but_does_not_start_unbound_example(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+    root = _named_bundle(tmp_path, "example")
+    (root / "spec.yaml").write_text(
+        'schema: "spec/v0.1"\nname: example\ncloud:\n  project: example\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        "spec_cli.commands.workday.load_credentials",
+        lambda: SimpleNamespace(access_token="token"),
+    )
+    monkeypatch.setattr("spec_cli.commands.workday._cloud_login_error", lambda _c: None)
+    monkeypatch.setattr(
+        "spec_cli.commands.workday.start_in_background",
+        lambda _root: (_ for _ in ()).throw(AssertionError("must not start")),
+    )
+
+    result = CliRunner().invoke(cli, ["on"])
+
+    assert result.exit_code == 0, result.output
+    assert "skipped 1 unbound bundle" in result.output
+    assert "unbound (run `spec push` first)" in result.output
+
+
+def test_spec_on_preflights_expired_login_before_starting_watchers(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+    root = _bundle(tmp_path)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        "spec_cli.commands.workday.load_credentials",
+        lambda: SimpleNamespace(access_token="expired"),
+    )
+    monkeypatch.setattr(
+        "spec_cli.commands.workday._cloud_login_error",
+        lambda _c: "Session expired",
+    )
+    monkeypatch.setattr(
+        "spec_cli.commands.workday.start_in_background",
+        lambda _root: (_ for _ in ()).throw(AssertionError("must not start")),
+    )
+
+    result = CliRunner().invoke(cli, ["on"])
+
+    assert result.exit_code == 0, result.output
+    assert "Session expired" in result.output
+    assert "run `spec login`, then `spec on` again" in result.output
+    assert load_preferences().autostart == "default"
 
 
 def test_spec_off_disables_preferences_stops_all_and_releases_locks(
