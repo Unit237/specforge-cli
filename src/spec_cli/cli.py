@@ -9,6 +9,7 @@ from .commands.add import add_cmd
 from .commands.bundle import bundle_group
 from .commands.compile import compile_cmd
 from .commands.codex import codex_group
+from .commands.discover import discover_cmd
 from .commands.git_hooks import git_hooks_group
 from .commands.hooks import hooks_group
 from .commands.init import init_cmd
@@ -46,6 +47,7 @@ def cli() -> None:
 
 
 cli.add_command(init_cmd)
+cli.add_command(discover_cmd)
 cli.add_command(bundle_group)
 cli.add_command(git_hooks_group)
 cli.add_command(shell_group)
