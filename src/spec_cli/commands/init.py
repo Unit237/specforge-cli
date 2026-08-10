@@ -12,6 +12,7 @@ import click
 from ..config import BundleNotFoundError, find_bundle_root
 from ..constants import MANIFEST_FILENAME, PROMPTS_DIRNAME
 from ..git import find_git_dir, repo_name_from_remote_url
+from ..preferences import remember_bundle
 from ..sources.claude_code import claude_code_store_root
 from ..ui import dim, fatal, info, ok, pointer
 
@@ -28,7 +29,8 @@ This bundle uses **Spec Live** to coordinate coding agents working in parallel.
 
 Before planning or editing:
 
-1. Read `.spec/team-coordination.md` when it exists. It lists active agent
+1. Run `spec status` to verify this machine's workday switch and watchers.
+   Read `.spec/team-coordination.md` when it exists; the brief lists active
    objectives, progress, claimed paths, and recent handoffs.
 2. Do not duplicate an active objective. Split the work, wait for the handoff,
    or tell the user about the overlap.
@@ -41,7 +43,10 @@ Before planning or editing:
 
 Treat the coordination brief as advisory and the lock check as the mechanical
 conflict signal. The brief disappears when the last active round finishes, so
-its absence is normal. Never hand-edit files under `.spec/`.
+its absence is normal. When Spec is OFF or a watcher is stopped, cross-machine
+context can be stale or absent and lock checks deliberately fail open. Only the
+human operator should change the workday switch with `spec on` / `spec off`.
+Never hand-edit files under `.spec/`.
 {AGENTS_COORDINATION_BLOCK_END}
 """
 
@@ -350,7 +355,8 @@ alwaysApply: true
 
 # Spec Live — check coordination before editing
 
-This bundle uses **Spec Live**. Before planning or editing, read
+This bundle uses **Spec Live**. Before planning or editing, run `spec status`
+to verify the machine workday switch and watcher, then read
 `.spec/team-coordination.md` when it exists. It lists active agent
 objectives, progress, claimed paths, and recent handoffs. Avoid
 duplicating active work. The file is removed automatically when the
@@ -391,6 +397,11 @@ might also be touching.
 This rule pairs with the Claude Code `PreToolUse` hook in
 `.claude/settings.json`, which performs the same check
 automatically for Edit / Write / MultiEdit tool calls.
+
+The human operator controls local sharing with `spec on` at the start of the
+workday and `spec off` when finished. Agents must not change that switch unless
+the user explicitly asks. When it is OFF, say that cross-machine context may be
+unavailable and continue using the fail-open lock result.
 """
 
 
@@ -804,6 +815,7 @@ def init_cmd(
         except OSError as e:
             fatal(f"Could not update {AGENTS_FILENAME}: {e}")
             return
+        remember_bundle(bundle_root)
         ok(
             "Spec Live rules refreshed — `.cursor/rules/spec-team-presence.mdc` "
             "plus Spec-managed `.claude/settings.json` and `AGENTS.md` blocks."
@@ -959,6 +971,7 @@ def init_cmd(
         starter_prompts_name=starter_prompts_name,
         agents_written=agents_written,
     )
+    remember_bundle(root)
 
     ok(f"Initialized bundle [bold]{bundle_name}[/] in {root}")
     if name_origin == "git" and name_origin_detail:

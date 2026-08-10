@@ -180,6 +180,21 @@ terminal, and streams a live "who is editing what" presence layer that AI IDEs
 can read before making file edits. **All of it is on by default the moment you
 install the CLI.**
 
+Use the machine-wide workday switch instead of managing bundle daemons one by
+one:
+
+```bash
+spec on       # start of day: enable sharing + autostart; start known bundles
+spec status   # global watcher state, then current bundle staging state
+spec off      # end of day: cleanly stop all watchers and release local locks
+```
+
+`spec on` learns the current bundle, remembers every bundle seen through
+`spec init` / `spec watch` / `spec live start`, and restarts those known bundle
+watchers idempotently. `spec off` mutes this machine before stopping them, so a
+shell hook cannot race the shutdown. It controls local coordination only;
+cloud-side PR jobs are configured and run separately.
+
 It also materializes active agent rounds into
 `.spec/team-coordination.json` and `.spec/team-coordination.md`. The brief
 shows objectives, latest progress, claimed paths, and recent handoffs. Agents
@@ -192,10 +207,8 @@ Spec-managed coordination block to `AGENTS.md` for Codex and other agents,
 without replacing the repository's own instructions.
 
 ```bash
-# Start the daemon. Run it once in a dedicated terminal pane and leave it
-# open alongside your editor. Broadcasts your prompts + dirty files;
-# receives teammates' the same way.
-spec watch
+# Start every known local watcher for the workday.
+spec on
 
 # One-shot snapshot — the last 20 prompt events, no daemon required.
 spec team
@@ -207,10 +220,10 @@ spec presence show
 spec presence check path/to/file.py
 #   exit 0 → clear · exit 2 → a teammate is editing it (warning printed)
 
-# See whether you're broadcasting right now and why
-spec live status
+# See the machine switch, all watchers, and current bundle state
+spec status
 
-# Kill switches
+# Advanced per-bundle / per-machine controls
 spec live off       # disable broadcasting for this bundle (writes spec.yaml)
 spec live mute      # silence broadcasting on this machine for every bundle
 spec live unmute    # remove the per-machine mute
@@ -219,6 +232,9 @@ spec live on        # re-enable for this bundle (with --verbose for full assista
 
 | Command | Purpose |
 |---|---|
+| `spec on` | Start-of-workday switch: unmute sharing, enable autostart, prune missing registrations, and start every known local bundle watcher. Safe to repeat. |
+| `spec off` | End-of-workday switch: disable new automatic starts, gracefully stop every known watcher, and release leftover local edit locks. Cloud-side jobs are configured separately. |
+| `spec status` | Machine-wide ON/OFF + watcher summary, followed by the current bundle's staging status when run inside a bundle. Works outside a bundle. |
 | `spec watch` | Long-running daemon. Broadcasts your prompts + dirty files; renders teammates' in your terminal. `--mirror` also writes incoming events to `prompts/captured/peers/<handle>/`. |
 | `spec team` | Snapshot of recent prompt activity (no SSE). |
 | `spec team watch` | Live workspace-wide SSE tail (`GET /api/me/prompt-stream`). **Default (non-compact) layout:** user bodies up to the schema wire cap; **assistant prose in each finished turn** is the merged stored body (same cap as `spec watch`), with fenced code collapsed to `[code: lang ~N lines]` unless you pass **`--show-tool-runs`**, which also lists structured tool calls and preserves code blocks. A **`● turn complete`** footer still points to **`/turn`** / **`/full`** for pager drill-in (whole thread, structured tools, or re-fetch from Cloud — see [docs/team-watch-slash-commands.md](docs/team-watch-slash-commands.md)). Headers: USER / AI / ERROR, source, branch, bundle, time; chip row: `cwd`, `touched`, color **`session`** id. Flags include `--compact`, `--no-verbose`, `--no-critic`, `--no-commands`, `--no-heartbeat`, `--show-tool-runs`, `--notify`. |

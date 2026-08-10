@@ -26,7 +26,7 @@ from ..config import (
     load_manifest,
     parse_cloud_project,
 )
-from ..preferences import load_preferences
+from ..preferences import load_preferences, remember_bundle
 from ..realtime import (
     WatcherOptions,
     WatcherStartError,
@@ -196,6 +196,8 @@ def watch_cmd(
     except BundleNotFoundError as e:
         fatal(str(e))
         return
+
+    remember_bundle(root)
 
     if background:
         # User asked us to fork+detach. Do that and return — the child

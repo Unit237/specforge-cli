@@ -35,7 +35,7 @@ from ..config import (
     find_bundle_root,
     load_manifest,
 )
-from ..preferences import load_preferences
+from ..preferences import load_preferences, remember_bundle
 from ..realtime import (
     WatcherStartError,
     is_running,
@@ -73,6 +73,10 @@ def _try_load_manifest() -> Manifest | None:
 @click.group("live")
 def live_group() -> None:
     """Spec Live — real-time prompt sharing toggles + daemon control.
+
+    For normal daily use, run top-level ``spec on`` / ``spec off`` and inspect
+    every known watcher with ``spec status``. The commands below are the
+    detailed per-bundle and per-policy controls.
 
     Broadcasting is on by default once the CLI is installed. The
     autostart hook in your shell rc starts ``spec watch`` in the
@@ -260,6 +264,7 @@ def live_start_cmd() -> None:
     except BundleNotFoundError as e:
         fatal(str(e))
         return
+    remember_bundle(root)
     try:
         outcome = start_in_background(root)
     except WatcherStartError as e:
@@ -378,6 +383,7 @@ def live_ensure_cmd(quiet: bool) -> None:
         # user's $HOME and most of /tmp.
         return
 
+    remember_bundle(root)
     if is_running(root) is not None:
         if not quiet:
             dim("already running")

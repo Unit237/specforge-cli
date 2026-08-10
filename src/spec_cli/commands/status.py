@@ -8,7 +8,7 @@ from ..config import BundleNotFoundError, find_bundle_root, load_manifest
 from ..constants import PROMPTS_DIRNAME
 from ..git import read_git_context
 from ..stage import classify_working_tree, load_index, prune_stale_index_entries
-from ..ui import console, dim, fatal
+from ..ui import console, dim
 
 
 _STATE_ORDER = [
@@ -242,7 +242,7 @@ def _print_unmerged_branch_prompts(root, *, current_branch: str) -> None:
     "common review-and-push loop.",
 )
 def status_cmd(show_all: bool, show_ignored: bool) -> None:
-    """Show what would be pushed from this bundle.
+    """Show machine live state and what would be pushed from this bundle.
 
     Section names mirror **git status**: **Staged for push** is the snapshot
     queued for ``spec push`` (like changes to be committed). **Modified**
@@ -251,10 +251,14 @@ def status_cmd(show_all: bool, show_ignored: bool) -> None:
     before push picks them up. By default, **clean** (matches last push) and
     **ignored** rows are hidden. Use ``--ignored`` / ``--all`` for full tree.
     """
+    from .workday import print_workday_status
+
+    print_workday_status()
+    console.print()
     try:
         root = find_bundle_root()
-    except BundleNotFoundError as e:
-        fatal(str(e))
+    except BundleNotFoundError:
+        dim("Not inside a Spec bundle; showing machine status only.")
         return
 
     manifest = load_manifest(root)

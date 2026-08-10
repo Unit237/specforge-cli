@@ -45,6 +45,7 @@ from spec_cli.realtime.daemon import (
     watch_pid_path,
     write_pid_file,
 )
+from spec_cli.realtime.daemon import _spec_exec_argv
 
 
 pytestmark = pytest.mark.skipif(
@@ -236,6 +237,22 @@ def test_is_running_ignores_records_from_other_hosts(tmp_path):
 
 
 # ── start_in_background ────────────────────────────────────────────
+
+
+def test_spec_exec_prefers_current_console_script_over_path(tmp_path, monkeypatch):
+    """A stale PATH entry must not make a working CLI spawn a broken daemon."""
+    current = tmp_path / "current" / "spec"
+    stale = tmp_path / "stale" / "spec"
+    current.parent.mkdir()
+    stale.parent.mkdir()
+    current.write_text("#!/bin/sh\n", encoding="utf-8")
+    stale.write_text("#!/bin/sh\n", encoding="utf-8")
+    current.chmod(0o755)
+    stale.chmod(0o755)
+    monkeypatch.setattr(sys, "argv", [str(current)])
+    monkeypatch.setenv("PATH", str(stale.parent))
+
+    assert _spec_exec_argv() == [str(current.resolve())]
 
 
 def test_start_in_background_spawns_and_writes_pid(tmp_path):

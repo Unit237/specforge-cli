@@ -495,10 +495,11 @@ def _spec_exec_argv() -> list[str]:
 
     1. ``$SPEC_BACKGROUND_EXEC`` — explicit env override (tests / power
        users who installed spec in a non-standard way).
-    2. ``shutil.which("spec")`` — the installed CLI on PATH. This is
-       what an interactive user typed, so we re-use it; matches the
-       wuv-tool-installed entry point.
-    3. ``[sys.executable, "-m", "spec_cli"]`` — fallback when spec is
+    2. The current ``spec`` console script from ``sys.argv[0]``. This keeps a
+       working CLI working even when a stale, broken ``spec`` appears earlier
+       on PATH in a login shell.
+    3. ``shutil.which("spec")`` — the installed CLI on PATH.
+    4. ``[sys.executable, "-m", "spec_cli"]`` — fallback when spec is
        run via ``python -m`` and isn't on PATH (development checkouts,
        CI). Always works even when the entry-point script is missing.
     """
@@ -511,6 +512,10 @@ def _spec_exec_argv() -> list[str]:
         parts = shlex.split(override)
         if parts:
             return parts
+
+    invoked = Path(sys.argv[0]).expanduser()
+    if invoked.name in ("spec", "spec.exe") and invoked.is_file():
+        return [str(invoked.resolve())]
 
     import shutil
 
