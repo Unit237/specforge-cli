@@ -18,11 +18,13 @@ from pathlib import Path
 
 import click
 
+from ..api import ApiError, CloudClient
 from ..config import (
     BundleNotFoundError,
     discover_bundle_roots_under_cwd,
     find_bundle_root,
     load_credentials,
+    load_manifest,
 )
 from ..preferences import Preferences, load_preferences
 from ..realtime import WatcherStartError, is_running, start_in_background, stop_daemon
@@ -87,6 +89,21 @@ def _missing_agent_rules(root: Path) -> bool:
     return not (agents_ready and cursor.is_file() and claude.is_file())
 
 
+def _bundle_is_cloud_bound(root: Path) -> bool:
+    """Whether a watcher has an immutable Cloud project to connect to.
+
+    Example/scaffold bundles commonly have a ``spec.yaml`` but no server-minted
+    ``cloud.bundle_id`` yet. Starting those from a parent workspace creates a
+    daemon that can only fail project resolution. ``spec push`` establishes the
+    binding; after that the next ``spec on`` includes it automatically.
+    """
+    try:
+        manifest = load_manifest(root)
+    except Exception:  # noqa: BLE001 — status must remain fail-open
+        return False
+    return bool(manifest.cloud_project and manifest.cloud_bundle_id)
+
+
 def _release_local_locks(root: Path) -> int:
     store = ActiveEditsStore(root)
     removed = 0
@@ -94,6 +111,17 @@ def _release_local_locks(root: Path) -> int:
         if store.release(lock.id):
             removed += 1
     return removed
+
+
+def _cloud_login_error(creds) -> str | None:
+    """Preflight the one credential shared by every watcher we are about to start."""
+    if not creds or not creds.access_token:
+        return "No Spec Cloud login found"
+    try:
+        CloudClient(creds)._request("GET", "/api/auth/me")  # noqa: SLF001
+    except ApiError as exc:
+        return str(exc)
+    return None
 
 
 def print_workday_status(*, include_bundles: bool = True) -> None:
@@ -104,8 +132,11 @@ def print_workday_status(*, include_bundles: bool = True) -> None:
         include_current=True,
         prune=False,
     )
+    bound = {root: _bundle_is_cloud_bound(root) for root in roots}
     running = [(root, is_running(root)) for root in roots]
-    running_count = sum(record is not None for _, record in running)
+    running_count = sum(bound[root] and record is not None for root, record in running)
+    bound_count = sum(bound.values())
+    unbound_count = len(roots) - bound_count
     is_on = not prefs.prompt_stream_muted and not prefs.autostart_disabled
 
     state = "ON" if is_on else "OFF"
@@ -113,7 +144,8 @@ def print_workday_status(*, include_bundles: bool = True) -> None:
     dim(
         f"  sharing: {'enabled' if not prefs.prompt_stream_muted else 'muted'}"
         f" · autostart: {'enabled' if not prefs.autostart_disabled else 'disabled'}"
-        f" · watchers: {running_count}/{len(roots)} running"
+        f" · watchers: {running_count}/{bound_count} running"
+        + (f" · unbound: {unbound_count}" if unbound_count else "")
     )
     if os.environ.get("SPEC_NO_AUTOSTART", "").strip() == "1":
         warn("SPEC_NO_AUTOSTART=1 is set in this shell; automatic starts are suppressed.")
@@ -126,7 +158,9 @@ def print_workday_status(*, include_bundles: bool = True) -> None:
         dim("  no bundles registered yet — run `spec on` from a Spec bundle once.")
         return
     for root, record in running:
-        if record is None:
+        if not bound[root]:
+            dim(f"  ○ {root} · unbound (run `spec push` first)")
+        elif record is None:
             dim(f"  ○ {root} · stopped")
         else:
             dim(f"  ● {root} · pid {record.pid}")
@@ -148,9 +182,10 @@ def workday_on_cmd() -> None:
     prefs.save()
 
     creds = load_credentials()
-    if not creds or not creds.access_token:
+    login_error = _cloud_login_error(creds)
+    if login_error:
         ok("Spec is ON for this machine.")
-        warn("No Spec Cloud login found; watchers will start after `spec login`.")
+        warn(f"{login_error}; run `spec login`, then `spec on` again.")
         print_workday_status()
         return
 
@@ -158,7 +193,11 @@ def workday_on_cmd() -> None:
     already_running = 0
     failures: list[tuple[Path, str]] = []
     missing_rules: list[Path] = []
+    unbound: list[Path] = []
     for root in roots:
+        if not _bundle_is_cloud_bound(root):
+            unbound.append(root)
+            continue
         if _missing_agent_rules(root):
             missing_rules.append(root)
         try:
@@ -179,6 +218,11 @@ def workday_on_cmd() -> None:
         dim(f"  pruned {stale} missing bundle registration(s).")
     for root, message in failures:
         warn(f"Could not start {root}: {message}")
+    if unbound:
+        dim(
+            f"  skipped {len(unbound)} unbound bundle(s); run `spec push` in them "
+            "before enabling their watcher."
+        )
     if missing_rules:
         warn(
             f"{len(missing_rules)} bundle(s) need current agent rules; run "
@@ -196,8 +240,7 @@ def workday_off_cmd() -> None:
     This is the end-of-workday command. It first disables new automatic
     starts, then gracefully stops local daemons so each can publish its final
     clean presence state, and finally releases leftover advisory edit locks.
-    Cloud PR automation is independent and remains available while laptops
-    are offline.
+    Cloud-side jobs are configured and run independently.
     """
     prefs = load_preferences()
     roots, stale = _known_bundle_roots(prefs, include_current=True, prune=False)

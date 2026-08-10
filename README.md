@@ -195,6 +195,13 @@ watchers idempotently. `spec off` mutes this machine before stopping them, so a
 shell hook cannot race the shutdown. It controls local coordination only;
 cloud-side PR jobs are configured and run separately.
 
+Only Cloud-bound bundles (a manifest with both `cloud.project` and the
+server-minted `cloud.bundle_id`) get a watcher. Local examples and fresh
+scaffolds are listed as **unbound** and skipped until their first successful
+`spec push`. `spec on` also preflights the shared CLI session once, so an
+expired login produces one actionable `spec login` message instead of several
+short-lived daemons.
+
 It also materializes active agent rounds into
 `.spec/team-coordination.json` and `.spec/team-coordination.md`. The brief
 shows objectives, latest progress, claimed paths, and recent handoffs. Agents
