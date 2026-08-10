@@ -13,7 +13,10 @@ That means:
   never block the user's work. The contract for blocking is the exit
   code; output is decoration.
 
-The two surfaces that exist today:
+The three surfaces that exist today:
+
+* ``spec hooks claude-user-prompt`` — Claude Code ``UserPromptSubmit``
+  hook. Prints the current coordination brief into the agent context.
 
 * ``spec hooks claude-pre-tool-use`` — Claude Code ``PreToolUse``
   hook. Reads stdin (Claude's hook protocol), parses out the file
@@ -57,9 +60,10 @@ from ..ui import dim
 CLAUDE_HOOK_AGENT_ID = "claude_code"
 
 
-CLAUDE_HOOK_VERSION = 1
+CLAUDE_HOOK_VERSION = 2
 CLAUDE_SETTINGS_DIR = ".claude"
 CLAUDE_SETTINGS_FILENAME = "settings.json"
+_COORDINATION_BRIEF_MAX_CHARS = 16_000
 
 
 def _locks_max_mirror_age_secs() -> float:
@@ -78,9 +82,38 @@ def hooks_group() -> None:
 
     \b
     Subcommands:
+      spec hooks claude-user-prompt   — inject current agent coordination
       spec hooks claude-pre-tool-use   — stdin-driven Claude Code hook
       spec hooks install-claude        — wire the hook into .claude/settings.json
     """
+
+
+@hooks_group.command("claude-user-prompt")
+def claude_user_prompt_cmd() -> None:
+    """Inject the current Spec Live coordination brief into Claude Code.
+
+    Missing bundle/file and read failures are silent no-ops. Hook output is
+    bounded because Claude includes stdout in the prompt context.
+    """
+    try:
+        root = find_bundle_root()
+    except BundleNotFoundError:
+        return
+    path = root / ".spec" / "team-coordination.md"
+    try:
+        if not path.is_file():
+            return
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if not text:
+        return
+    if len(text) > _COORDINATION_BRIEF_MAX_CHARS:
+        text = text[:_COORDINATION_BRIEF_MAX_CHARS].rstrip() + "\n[…truncated…]"
+    click.echo(
+        "Current Spec Live team coordination. Read before planning or "
+        "editing; avoid duplicating active work.\n\n" + text
+    )
 
 
 # ── Claude Code PreToolUse hook ───────────────────────────────────────
@@ -550,7 +583,7 @@ def install_claude_settings(bundle_root: Path, *, block_mode: bool) -> Path:
                    "type": "command",
                    "command": "spec hooks claude-pre-tool-use",
                    "spec_managed": true,
-                   "spec_version": 1
+                   "spec_version": 2
                  }
                ]
              }
@@ -560,9 +593,9 @@ def install_claude_settings(bundle_root: Path, *, block_mode: bool) -> Path:
                "hooks": [
                  {
                    "type": "command",
-                   "command": "spec live ensure --quiet",
+                   "command": "spec live ensure --quiet && spec hooks claude-user-prompt",
                    "spec_managed": true,
-                   "spec_version": 1
+                   "spec_version": 2
                  }
                ]
              }
@@ -574,9 +607,8 @@ def install_claude_settings(bundle_root: Path, *, block_mode: bool) -> Path:
 
     * ``PreToolUse`` — warn (or block, with ``--block``) before Claude
       edits a file a teammate is currently in.
-    * ``UserPromptSubmit`` — autostart the live watcher daemon on the
-      user's first prompt of each Claude session, so receiving works
-      even for Claude-only users who never open a terminal.
+    * ``UserPromptSubmit`` — autostart the live watcher daemon and inject
+      the current coordination brief before each Claude prompt.
 
     The ``spec_managed`` / ``spec_version`` markers are how we identify
     the entry on subsequent runs — anything else under ``hooks`` is
@@ -661,7 +693,10 @@ def install_claude_settings(bundle_root: Path, *, block_mode: bool) -> Path:
         "hooks": [
             {
                 "type": "command",
-                "command": "spec live ensure --quiet",
+                "command": (
+                    "spec live ensure --quiet && "
+                    "spec hooks claude-user-prompt"
+                ),
                 "spec_managed": True,
                 "spec_version": CLAUDE_HOOK_VERSION,
             }

@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import json
+import threading
+from datetime import datetime, timedelta, timezone
+
+from spec_cli.realtime.coordination import CoordinationCache, TeamCoordinationMirror
+from spec_cli.realtime.events import IncomingEvent, ToolCallPayload
+
+
+NOW = datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc)
+
+
+def _event(
+    event_id: int,
+    *,
+    role: str,
+    session: str,
+    source: str = "codex",
+    user_id: int = 1,
+    handle: str = "alice",
+    text: str | None = None,
+    summary: str | None = None,
+    paths: list[str] | None = None,
+    tools: list[ToolCallPayload] | None = None,
+    closes_event_id: int | None = None,
+    seconds: int = 0,
+) -> IncomingEvent:
+    at = NOW + timedelta(seconds=seconds)
+    return IncomingEvent(
+        id=event_id,
+        project_id=10,
+        session_id=session,
+        source=source,
+        role=role,
+        branch="main",
+        commit_sha="abc",
+        model="test-model",
+        summary=summary,
+        text=text,
+        title="Session title",
+        cwd=None,
+        paths_touched=paths or [],
+        turn_at=at,
+        received_at=at,
+        author_user_id=user_id,
+        author_handle=handle,
+        author_name=handle.title(),
+        author_avatar_url=None,
+        tool_calls=tools or [],
+        closes_event_id=closes_event_id,
+        broadcast_client_id=f"client-{user_id}",
+    )
+
+
+def test_round_lifecycle_keeps_handoff_until_last_agent_finishes(tmp_path):
+    cache = CoordinationCache(tmp_path)
+    assert cache.apply_event(_event(1, role="user", session="a", text="Build auth"))
+    assert cache.apply_event(
+        _event(
+            2,
+            role="assistant",
+            session="a",
+            summary="Editing token validation",
+            paths=["src/auth.py"],
+            tools=[ToolCallPayload("Edit", {"file_path": "src/auth.py"})],
+            seconds=1,
+        )
+    )
+    assert cache.apply_event(
+        _event(
+            3,
+            role="user",
+            session="b",
+            source="compress",
+            user_id=2,
+            handle="bob",
+            text="Add auth tests",
+            seconds=2,
+        )
+    )
+    assert cache.apply_event(_event(4, role="assistant_closed", session="a", seconds=3))
+
+    snapshot = cache.snapshot(now=NOW + timedelta(seconds=4))
+    assert snapshot is not None
+    assert [row["session_id"] for row in snapshot["active"]] == ["b"]
+    assert snapshot["recent_outcomes"][0]["session_id"] == "a"
+    assert snapshot["recent_outcomes"][0]["outcome"] == "Editing token validation"
+    assert snapshot["files_index"] == {}
+
+    assert cache.apply_event(
+        _event(
+            5,
+            role="assistant_closed",
+            session="b",
+            source="compress",
+            user_id=2,
+            handle="bob",
+            seconds=5,
+        )
+    )
+    assert cache.snapshot(now=NOW + timedelta(seconds=6)) is None
+
+
+def test_same_session_new_user_starts_new_generation(tmp_path):
+    cache = CoordinationCache(tmp_path)
+    cache.apply_event(_event(1, role="user", session="a", text="First"))
+    cache.apply_event(_event(2, role="user", session="a", text="Second", seconds=1))
+    snapshot = cache.snapshot(now=NOW + timedelta(seconds=2))
+    assert snapshot is not None
+    assert snapshot["active"][0]["generation"] == 2
+    assert snapshot["active"][0]["objective"] == "Second"
+    assert snapshot["recent_outcomes"][0]["generation"] == 1
+
+
+def test_duplicate_and_out_of_order_events_do_not_rewind(tmp_path):
+    cache = CoordinationCache(tmp_path)
+    cache.apply_event(_event(2, role="user", session="a", text="New"))
+    assert cache.apply_event(_event(1, role="user", session="a", text="Old")) is False
+    snapshot = cache.snapshot(now=NOW + timedelta(seconds=1))
+    assert snapshot is not None
+    assert snapshot["active"][0]["objective"] == "New"
+
+
+def test_delayed_close_from_prior_generation_does_not_close_new_prompt(tmp_path):
+    cache = CoordinationCache(tmp_path)
+    cache.apply_event(_event(1, role="user", session="a", text="First"))
+    cache.apply_event(_event(2, role="assistant", session="a", summary="First done"))
+    cache.apply_event(_event(3, role="user", session="a", text="Second"))
+
+    assert (
+        cache.apply_event(
+            _event(
+                4,
+                role="assistant_closed",
+                session="a",
+                closes_event_id=2,
+            )
+        )
+        is False
+    )
+    snapshot = cache.snapshot(now=NOW + timedelta(seconds=5))
+    assert snapshot is not None
+    assert snapshot["active"][0]["objective"] == "Second"
+
+
+def test_stale_round_expires_and_mirror_deletes_files(tmp_path):
+    cache = CoordinationCache(tmp_path, freshness_secs=10)
+    mirror = TeamCoordinationMirror(tmp_path)
+    cache.apply_event(_event(1, role="user", session="a", text="Build auth"))
+    assert mirror.sync(cache, now=NOW + timedelta(seconds=1))
+    assert mirror.json_path.is_file()
+    assert mirror.md_path.is_file()
+    body = json.loads(mirror.json_path.read_text(encoding="utf-8"))
+    assert body["active"][0]["objective"] == "Build auth"
+    assert "Read this before planning or editing" in mirror.md_path.read_text(encoding="utf-8")
+
+    assert mirror.sync(cache, now=NOW + timedelta(seconds=11))
+    assert not mirror.json_path.exists()
+    assert not mirror.md_path.exists()
+
+
+def test_tool_paths_are_normalized_and_indexed(tmp_path):
+    cache = CoordinationCache(tmp_path)
+    cache.apply_event(_event(1, role="user", session="a", text="Edit files"))
+    cache.apply_event(
+        _event(
+            2,
+            role="assistant",
+            session="a",
+            tools=[
+                ToolCallPayload("Edit", {"file_path": "./src/auth.py"}),
+                ToolCallPayload("Write", {"path": "../outside.py"}),
+            ],
+            seconds=1,
+        )
+    )
+    snapshot = cache.snapshot(now=NOW + timedelta(seconds=2))
+    assert snapshot is not None
+    assert list(snapshot["files_index"]) == ["src/auth.py"]
+
+
+def test_concurrent_snapshots_remain_valid_during_updates(tmp_path):
+    cache = CoordinationCache(tmp_path)
+    cache.apply_event(_event(1, role="user", session="a", text="Build auth"))
+    snapshots: list[dict] = []
+    failures: list[Exception] = []
+
+    def _read() -> None:
+        try:
+            for _ in range(100):
+                snapshot = cache.snapshot(now=NOW + timedelta(seconds=20))
+                if snapshot is not None:
+                    json.dumps(snapshot)
+                    snapshots.append(snapshot)
+        except Exception as exc:  # pragma: no cover - assertion captures it
+            failures.append(exc)
+
+    reader = threading.Thread(target=_read)
+    reader.start()
+    for event_id in range(2, 22):
+        cache.apply_event(
+            _event(
+                event_id,
+                role="assistant",
+                session="a",
+                summary=f"Progress {event_id}",
+                seconds=event_id,
+            )
+        )
+    reader.join(timeout=2)
+
+    assert not failures
+    assert snapshots
+    assert all(snapshot["schema"] == "spec.team-coordination/v1" for snapshot in snapshots)
+
+
+def test_atomic_write_failure_preserves_existing_file(tmp_path, monkeypatch):
+    cache = CoordinationCache(tmp_path)
+    mirror = TeamCoordinationMirror(tmp_path)
+    cache.apply_event(_event(1, role="user", session="a", text="Build auth"))
+    mirror.spec_dir.mkdir(parents=True)
+    mirror.json_path.write_text("prior\n", encoding="utf-8")
+
+    def _fail_replace(_source, _target):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr("spec_cli.realtime.coordination.os.replace", _fail_replace)
+
+    assert mirror.sync(cache, now=NOW + timedelta(seconds=1)) is False
+    assert mirror.json_path.read_text(encoding="utf-8") == "prior\n"
+    assert list(mirror.spec_dir.glob("*.tmp")) == []

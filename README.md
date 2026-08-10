@@ -143,7 +143,7 @@ the compiler sees on the next run — see
 
 | Command | Purpose |
 |---|---|
-| `spec prompts capture --source claude_code\|cursor\|codex\|all` | Append new local agent sessions to `prompts/<branch>.prompts`. Deterministic; re-running skips sessions already captured at the same turn count. |
+| `spec prompts capture --source claude_code\|cursor\|codex\|compress\|all` | Append new local agent sessions to `prompts/<branch>.prompts`. Deterministic; re-running skips sessions already captured at the same turn count. |
 | `spec prompts validate` | Check every `.prompt` file against the schema. Exit 1 on error. |
 | `spec prompts simulate` | (Contract-only in v0.1) Replay a session through the compiler in a read-only sandbox. |
 
@@ -168,16 +168,28 @@ tokens and Authorization headers are redacted before serialization.
 
 For the normal git-like workflow, you usually do not need the Codex-specific
 command: `spec add .`, `git commit` with Spec hooks, and
-`spec prompts capture --source all` scan the local Claude Code, Cursor, and
-Codex Desktop stores for sessions that belong to the current bundle.
+`spec prompts capture --source all` scan the local Claude Code, Cursor,
+Codex Desktop, and Compress stores for sessions that belong to the current
+bundle.
 
 ### Spec Live — real-time team feed
 
-Spec Live broadcasts every new prompt you write in Cursor / Claude Code / Codex
+Spec Live broadcasts every new prompt you write in Cursor / Claude Code / Codex / Compress
 to the rest of your team within a few seconds, surfaces theirs back in your
 terminal, and streams a live "who is editing what" presence layer that AI IDEs
 can read before making file edits. **All of it is on by default the moment you
 install the CLI.**
+
+It also materializes active agent rounds into
+`.spec/team-coordination.json` and `.spec/team-coordination.md`. The brief
+shows objectives, latest progress, claimed paths, and recent handoffs. Agents
+read it before planning; when the last round finishes or expires, both files
+are removed automatically.
+
+After upgrading an existing bundle, run `spec init --upgrade-rules` once.
+It refreshes Cursor and Claude integrations and appends an idempotent
+Spec-managed coordination block to `AGENTS.md` for Codex and other agents,
+without replacing the repository's own instructions.
 
 ```bash
 # Start the daemon. Run it once in a dedicated terminal pane and leave it
@@ -215,7 +227,7 @@ spec live on        # re-enable for this bundle (with --verbose for full assista
 | `spec presence check <path>` | Exit code is the contract: 0 = clear, 2 = a teammate is editing the path. |
 | `spec locks check <path>` | Same exit-code contract as `presence check`, but ignores a stale presence mirror. `--json` output also carries `pull_alerts` for teammates who are on the same branch and ahead of your `HEAD`. **Also surfaces same-machine multi-agent conflicts** — if your Cursor pane has `auth.py` locked while Claude Code asks, you'll see it. |
 | `spec locks pull-status` | Exit `0` when no teammate is ahead of your branch, `2` when at least one same-branch peer has a different `head_commit` — i.e. they pushed and you should `git pull`. `--json` for hooks. |
-| `spec locks acquire <path>` | Take a per-machine **active-edit** lock for a single AI agent. Use `--agent claude_code\|cursor\|codex\|...` plus `--session <id>` so the same agent renewing doesn't conflict with itself. `--block` exits `2` on cross-agent overlap. Locks have a TTL (default 5 min, cap 60 min) so a crashed agent never deadlocks. |
+| `spec locks acquire <path>` | Take a per-machine **active-edit** lock for a single AI agent. Use `--agent claude_code\|cursor\|codex\|compress\|...` plus `--session <id>` so the same agent renewing doesn't conflict with itself. `--block` exits `2` on cross-agent overlap. Locks have a TTL (default 5 min, cap 60 min) so a crashed agent never deadlocks. |
 | `spec locks release <lock_id>` | Drop a previously-acquired active-edit lock. Unknown ids exit `0` (no-op) — PostToolUse hooks fire unconditionally and must never break. |
 | `spec locks list` | Show every active edit lock in this bundle. Filterable by `--agent` / `--session`; `--include-expired` reveals stale rows. |
 | `spec locks prune` | Physically remove expired active-edit locks. Reads already filter them; this is housekeeping. |

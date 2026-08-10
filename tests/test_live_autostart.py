@@ -216,7 +216,9 @@ def test_install_claude_writes_user_prompt_submit_autostart(tmp_path):
     ]
     assert len(spec_entries) == 1, "exactly one Spec-managed UserPromptSubmit entry"
     inner = spec_entries[0]["hooks"][0]
-    assert inner["command"] == "spec live ensure --quiet"
+    assert inner["command"] == (
+        "spec live ensure --quiet && spec hooks claude-user-prompt"
+    )
 
 
 def test_install_claude_user_prompt_submit_idempotent(tmp_path):
@@ -283,4 +285,6 @@ def test_install_claude_preserves_user_authored_user_prompt_submit(tmp_path):
         if isinstance(h, dict)
     ]
     assert "/usr/local/bin/audit-prompts" in cmds  # user's untouched
-    assert "spec live ensure --quiet" in cmds       # ours appended
+    assert (
+        "spec live ensure --quiet && spec hooks claude-user-prompt" in cmds
+    )  # ours appended

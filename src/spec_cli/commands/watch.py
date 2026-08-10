@@ -164,7 +164,7 @@ def watch_cmd(
 ) -> None:
     """Stream prompts to and from your team in real time.
 
-    For each new turn in any local Cursor / Codex / Claude Code session,
+    For each new turn in any local Cursor / Codex / Claude Code / Compress session,
     Spec Live POSTs a redacted event to Spec Cloud. Cloud fans the
     event out over an SSE stream to every teammate's `spec watch`
     daemon, which renders it in their terminal within a few seconds.

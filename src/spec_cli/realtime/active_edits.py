@@ -61,7 +61,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -86,7 +86,7 @@ MAX_LOCK_TTL_SECS = 3600
 # store; this set is exposed so callers can use stable values that the
 # brief / check renderers know how to colour-code.
 KNOWN_AGENTS = frozenset(
-    {"claude_code", "cursor", "codex", "manual", "spec_cli"}
+    {"claude_code", "cursor", "codex", "compress", "manual", "spec_cli"}
 )
 
 

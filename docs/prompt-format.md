@@ -153,7 +153,7 @@ author_username = "alicec"                 # optional · Cloud handle when linke
 # ── One or more conversational sessions ────────────────────────────
 [[sessions]]
 id          = "d1714569-2799-464b-9a0e-360aced5767c"
-source      = "claude_code"                # claude_code | cursor | codex | manual
+source      = "claude_code"                # claude_code | cursor | codex | compress | manual
 model       = "claude-sonnet-4-6"
 started_at  = 2026-04-21T11:47:12Z
 ended_at    = 2026-04-21T11:58:03Z
@@ -241,7 +241,7 @@ Public-facing UI (cards, feed, permalinks) only ever shows
 | Field        | Required | Notes                                                                 |
 | ------------ | -------- | --------------------------------------------------------------------- |
 | `id`         | yes      | unique UUID-ish string; primary key in Cloud and in permalinks         |
-| `source`     | yes      | `claude_code` \| `cursor` \| `codex` \| `manual`                       |
+| `source`     | yes      | `claude_code` \| `cursor` \| `codex` \| `compress` \| `manual`          |
 | `model`      | no       | captured model name (what the engineer actually ran)                   |
 | `started_at` | no       | UTC RFC-3339                                                           |
 | `ended_at`   | no       | UTC RFC-3339                                                           |
@@ -377,7 +377,7 @@ A `.prompts` file is valid iff:
    non-empty.
 5. `[[sessions]]` contains at least one session.
 6. Each session has `id` (non-empty, unique within the file) and
-   `source` ∈ `{claude_code, cursor, codex, manual}`.
+   `source` ∈ `{claude_code, cursor, codex, compress, manual}`.
 7. Each session has at least one `[[turns]]` entry.
 8. Every turn has a `role` in the allowed set; `user` has `text` (per-turn
    cap, 512 KiB in the reference validator) and no `model`; `assistant`
@@ -545,14 +545,12 @@ pending prompts.
 ## Capture flow
 
 ```
-spec prompts capture   Discover new sessions from local Claude Code /
-                            Cursor stores (not yet implemented). Writes
-                            a single prompts/captured/<ISO-timestamp>.prompts
-                            file containing every session captured in this
-                            invocation.
+spec prompts capture   Discover new sessions from local Claude Code,
+                            Cursor, Codex, and Compress stores. Appends
+                            snapshots to prompts/<branch>.prompts.
 
   --since <iso>             Only sessions started after this time.
-  --source claude_code|cursor|codex|all
+  --source claude_code|cursor|codex|compress|all
                             Restrict to one source. Default: all.
 
 spec codex capture       Show recent Codex Desktop chats for this bundle,

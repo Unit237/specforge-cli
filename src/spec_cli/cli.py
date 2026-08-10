@@ -35,7 +35,8 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": 
     context_settings=CONTEXT_SETTINGS,
     help=(
         "Spec — governed bundles of plain-English source code.\n\n"
-        "Author intent (`.md`), capture prompt history (`.prompt`), compile with Claude Code."
+        "Author intent (`.md`), capture prompt history (`.prompts`), compile with "
+        "your coding agent or configured model API."
     ),
 )
 @click.version_option(__version__, "-V", "--version", prog_name="spec")

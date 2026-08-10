@@ -35,7 +35,6 @@ import click
 
 from ..config import BundleNotFoundError, find_bundle_root
 from ..constants import (
-    PROMPTS_CAPTURED_DIRNAME,
     PROMPTS_CURATED_DIRNAME,
     PROMPTS_DIRNAME,
     PROMPTS_PENDING_DIRNAME,
@@ -51,7 +50,6 @@ from ..prompts import (
 )
 from ..prompts.render import (
     branch_prompts_filename,
-    prompts_filename,
     render_prompts_file,
 )
 from ..prompts.tiers import (
@@ -68,6 +66,7 @@ from ..prompts.tiers import (
 from ..sources import (
     ClaudeCodeError,
     CodexError,
+    CompressError,
     CursorError,
     claude_code_project_dir,
     claude_code_store_root,
@@ -75,9 +74,11 @@ from ..sources import (
     codex_project_dir,
     codex_store_root,
     codex_transcript_store_available,
+    compress_session_store_root,
     cursor_workspace_storage_root,
     read_claude_code_sessions,
     read_codex_sessions,
+    read_compress_sessions,
     read_cursor_sessions,
 )
 from ..stage import (
@@ -630,11 +631,12 @@ def peek_pending_prompt_captures(bundle_root: Path) -> PendingCapturePeek | None
 
         claude_store = claude_code_store_root()
         cursor_store = cursor_workspace_storage_root()
-        codex_store = codex_store_root()
+        compress_store = compress_session_store_root()
         claude_available = claude_store.exists()
         cursor_available = cursor_store.exists()
         codex_available = codex_transcript_store_available()
-        if not claude_available and not cursor_available and not codex_available:
+        compress_available = compress_store.exists()
+        if not any((claude_available, cursor_available, codex_available, compress_available)):
             return None
 
         git = read_git_context(bundle_root)
@@ -684,6 +686,20 @@ def peek_pending_prompt_captures(bundle_root: Path) -> PendingCapturePeek | None
                     already_counts[session.id] = len(session.turns)
                     new_sessions.append(session)
             except CodexError:
+                return None
+
+        if compress_available:
+            try:
+                for session in read_compress_sessions(
+                    paths_for_lookup, since=None, verbose=False
+                ):
+                    prev = already_counts.get(session.id, 0)
+                    if len(session.turns) <= prev:
+                        continue
+                    new_turn_count += len(session.turns) - prev
+                    already_counts[session.id] = len(session.turns)
+                    new_sessions.append(session)
+            except CompressError:
                 return None
 
         if not new_sessions:
@@ -737,11 +753,12 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
 
     claude_store = claude_code_store_root()
     cursor_store = cursor_workspace_storage_root()
-    codex_store = codex_store_root()
+    compress_store = compress_session_store_root()
     claude_available = claude_store.exists()
     cursor_available = cursor_store.exists()
     codex_available = codex_transcript_store_available()
-    if not claude_available and not cursor_available and not codex_available:
+    compress_available = compress_store.exists()
+    if not any((claude_available, cursor_available, codex_available, compress_available)):
         return None
 
     git = read_git_context(bundle_root)
@@ -786,6 +803,18 @@ def run_auto_capture(bundle_root: Path) -> Path | None:
                 already_counts[session.id] = len(session.turns)
                 discovered.append(session)
         except CodexError:
+            return None
+
+    if compress_available:
+        try:
+            for session in read_compress_sessions(
+                paths_for_lookup, since=None, verbose=True
+            ):
+                if not _session_has_new_turns(session, already_counts):
+                    continue
+                already_counts[session.id] = len(session.turns)
+                discovered.append(session)
+        except CompressError:
             return None
 
     if not discovered:
@@ -861,11 +890,12 @@ def run_capture_for_pre_commit_hook(
 
         claude_store = claude_code_store_root()
         cursor_store = cursor_workspace_storage_root()
-        codex_store = codex_store_root()
+        compress_store = compress_session_store_root()
         claude_available = claude_store.exists()
         cursor_available = cursor_store.exists()
         codex_available = codex_transcript_store_available()
-        if not claude_available and not cursor_available and not codex_available:
+        compress_available = compress_store.exists()
+        if not any((claude_available, cursor_available, codex_available, compress_available)):
             return
 
         git = read_git_context(bundle_root)
@@ -911,6 +941,18 @@ def run_capture_for_pre_commit_hook(
                     already_counts[session.id] = len(session.turns)
                     discovered.append(session)
             except CodexError:
+                return
+
+        if compress_available:
+            try:
+                for session in read_compress_sessions(
+                    paths_for_lookup, since=None, verbose=True
+                ):
+                    if not _session_has_new_turns(session, already_counts):
+                        continue
+                    already_counts[session.id] = len(session.turns)
+                    discovered.append(session)
+            except CompressError:
                 return
 
         if not discovered:
@@ -1015,9 +1057,12 @@ def prompts_group() -> None:
 @prompts_group.command("capture")
 @click.option(
     "--source",
-    type=click.Choice(["claude_code", "cursor", "codex", "all"], case_sensitive=False),
+    type=click.Choice(
+        ["claude_code", "cursor", "codex", "compress", "all"],
+        case_sensitive=False,
+    ),
     default="all",
-    help="Restrict capture to one source (claude_code, cursor, codex) or read all.",
+    help="Restrict capture to one source (claude_code, cursor, codex, compress) or read all.",
 )
 @click.option(
     "--since",
@@ -1061,7 +1106,7 @@ def capture_cmd(
     """Snapshot every new conversational session into one `.prompts` file.
 
     Reads local coding-agent stores for *this* bundle only (Claude Code,
-    Cursor, and Codex when available); other repos are not included.
+    Cursor, Codex, and Compress when available); other repos are not included.
     The first time you run capture, every session in that folder that has
     not yet been written to a ``.prompts`` file is included, which can be
     many. Use ``--max-sessions`` or ``--since`` to cap the batch.
@@ -1104,12 +1149,13 @@ def capture_cmd(
     paths_for_lookup = historical_bundle_paths(root)
 
     requested = source.lower()
-    if requested not in ("claude_code", "cursor", "codex", "all"):
+    if requested not in ("claude_code", "cursor", "codex", "compress", "all"):
         fatal(f"Unknown source `{source}`.")
         return
     want_claude = requested in ("claude_code", "all")
     want_cursor = requested in ("cursor", "all")
     want_codex = requested in ("codex", "all")
+    want_compress = requested in ("compress", "all")
 
     # Probe each requested store. Missing stores aren't errors when
     # `--source all` is the default — a user with only Cursor (or only
@@ -1117,9 +1163,11 @@ def capture_cmd(
     claude_store = claude_code_store_root()
     cursor_store = cursor_workspace_storage_root()
     codex_store = codex_store_root()
+    compress_store = compress_session_store_root()
     claude_available = want_claude and claude_store.exists()
     cursor_available = want_cursor and cursor_store.exists()
     codex_available = want_codex and codex_transcript_store_available()
+    compress_available = want_compress and compress_store.exists()
 
     if requested == "claude_code" and not claude_available:
         dim(f"Claude Code store not found at {claude_store}.")
@@ -1136,12 +1184,17 @@ def capture_cmd(
         dim(f"  Cursor/Codex:   {codex_store}")
         info("Open this bundle in Codex and chat at least once, then re-run `spec prompts capture`.")
         return
-    if not claude_available and not cursor_available and not codex_available:
+    if requested == "compress" and not compress_available:
+        dim(f"Compress session store not found at {compress_store}.")
+        info("Run `pcompresslr agent` once, then re-run `spec prompts capture`.")
+        return
+    if not any((claude_available, cursor_available, codex_available, compress_available)):
         dim("No coding-agent stores found on this machine.")
         dim(f"  Claude Code: {claude_store}")
         dim(f"  Cursor:      {cursor_store}")
         dim(f"  Codex:       {codex_desktop_index_path()} or {codex_store}")
-        info("Install Claude Code/Cursor/Codex, start a session, then re-run.")
+        dim(f"  Compress:    {compress_store}")
+        info("Start a Claude Code/Cursor/Codex/Compress session, then re-run.")
         return
 
     # Capture context: git state + user identity. `read_git_context` fails
@@ -1198,6 +1251,19 @@ def capture_cmd(
             fatal(str(e))
             return
 
+    if compress_available:
+        try:
+            for session in read_compress_sessions(
+                paths_for_lookup, since=since_dt, verbose=capture_text
+            ):
+                if not _session_has_new_turns(session, already_counts):
+                    continue
+                already_counts[session.id] = len(session.turns)
+                discovered.append(session)
+        except CompressError as e:
+            fatal(str(e))
+            return
+
     if not discovered:
         dim("No new sessions to capture.")
         return
@@ -1236,6 +1302,8 @@ def capture_cmd(
                 f"Codex transcript stores: {codex_desktop_index_path()} "
                 f"or {codex_project_dir(root)}"
             )
+        if compress_available:
+            dim(f"Compress session store: {compress_store}")
 
     # Tag each session with who drove it. With git identity alone this is
     # a best guess; when credentials are linked to Cloud, the username is
