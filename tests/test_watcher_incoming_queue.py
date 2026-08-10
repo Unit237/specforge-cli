@@ -1,11 +1,9 @@
 """``spec watch`` must not render SSE frames on the reader thread."""
 from __future__ import annotations
 
-import queue
+import json
 import threading
 import time
-
-import pytest
 
 from spec_cli.realtime.watcher import WatcherOptions, run_watcher
 
@@ -72,6 +70,13 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
         )
         for i in (1, 2, 3)
     ]
+    # The first frame is this install's own SSE echo. It should stay out of
+    # terminal output while still contributing to the shared coordination
+    # projection.
+    events[0].author_user_id = 1
+    events[0].author_handle = "alice"
+    events[0].author_name = "Alice"
+    events[0].broadcast_client_id = "local-install"
     consumer = _FastEnqueueConsumer(events)
     notifier = _BlockingNotifier()
 
@@ -87,8 +92,6 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
         "spec_cli.realtime.watcher.SSEConsumer",
         lambda *a, **kw: consumer,
     )
-
-    delivered: list[int] = []
 
     def _run_consumer(c, on_event, on_fatal, **kw):  # type: ignore[no-untyped-def]
         def _worker() -> None:
@@ -139,6 +142,7 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
         api_base="http://localhost",
         access_token="t",
         self_user_id=1,
+        broadcast_client_id="local-install",
         receive=True,
         broadcast=False,
         presence_enabled=False,
@@ -153,4 +157,11 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
 
     run_watcher(tmp_path, opts, stop_event=stop)
 
-    assert notifier.show_calls == [1, 2, 3]
+    assert notifier.show_calls == [2, 3]
+    board = json.loads(
+        (tmp_path / ".spec" / "team-coordination.json").read_text(encoding="utf-8")
+    )
+    assert {row["author"]["handle"] for row in board["active"]} == {
+        "alice",
+        "bob",
+    }

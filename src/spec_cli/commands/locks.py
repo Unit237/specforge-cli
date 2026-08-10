@@ -20,7 +20,6 @@ import click
 from ..config import BundleNotFoundError, find_bundle_root
 from ..realtime.active_edits import (
     DEFAULT_LOCK_TTL_SECS,
-    KNOWN_AGENTS,
     ActiveEditLock,
     ActiveEditsStore,
 )
@@ -443,7 +442,7 @@ def _active_lock_to_holder(lock: ActiveEditLock) -> dict:
     help=(
         "Identifier for the agent taking the lock. Known agents that "
         "get coloured / labelled output: claude_code, cursor, codex, "
-        "manual. Free-form strings are accepted; stick to one per "
+        "compress, manual. Free-form strings are accepted; stick to one per "
         "tool so the brief stays readable."
     ),
 )

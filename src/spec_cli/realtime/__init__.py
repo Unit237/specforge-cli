@@ -4,7 +4,7 @@ Spec Live — real-time prompt sharing.
 The CLI side of the live prompt feed. ``spec watch`` runs a small
 in-process orchestrator that does two things concurrently:
 
-* **Broadcast** — polls Cursor / Codex / Claude Code transcripts every
+* **Broadcast** — polls Cursor / Codex / Claude Code / Compress transcripts every
   few seconds, redacts each new turn, and posts it to Cloud's
   ``POST /api/projects/{id}/prompt-events`` endpoint.
 * **Receive** — holds a long-lived SSE connection on

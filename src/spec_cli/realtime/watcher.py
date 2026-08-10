@@ -4,7 +4,7 @@ The ``spec watch`` orchestrator: producer + consumer.
 Two threads on top of a shared ``LiveCursor``:
 
 * **Producer** — every ``poll_interval`` seconds, scans local Cursor /
-  Codex / Claude Code transcripts for the bundle, finds turns that
+  Codex / Claude Code / Compress transcripts for the bundle, finds turns that
   haven't been broadcast yet (per the cursor), redacts them, and POSTs
   one event per new turn to ``/api/projects/{id}/prompt-events``.
 
@@ -45,19 +45,23 @@ from .events import IncomingEvent
 from ..sources import (
     ClaudeCodeError,
     CodexError,
+    CompressError,
     CursorError,
     claude_code_store_root,
     codex_transcript_store_available,
+    compress_session_store_root,
     cursor_global_storage_db,
     cursor_workspace_storage_root,
     read_claude_code_sessions,
     read_codex_sessions,
+    read_compress_sessions,
     read_cursor_sessions,
     redact_text,
 )
 from ..stage import historical_bundle_paths, record_bundle_path
 from ..ui import configure_streaming_stdio, dim, warn
 from .broadcast_identity import load_or_create_broadcast_client_id
+from .coordination import CoordinationCache, TeamCoordinationMirror
 from .events import OutgoingEvent, ToolCallPayload
 from .live_event_dedup import LivePromptEventDeduper
 from .mirror import PeerMirror
@@ -207,7 +211,9 @@ def _post_assistant_closed(
     """
     src = (
         session.source
-        if session.source in ("cursor", "codex", "claude_code", "manual")
+        if session.source in (
+            "cursor", "codex", "claude_code", "compress", "manual"
+        )
         else "manual"
     )
     evt = OutgoingEvent(
@@ -344,6 +350,7 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
     n_cursor = -1
     n_claude = -1
     n_codex = -1
+    n_compress = -1
 
     ws_root = cursor_workspace_storage_root()
     if not ws_root.exists():
@@ -401,6 +408,22 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
         n_codex = 0
         bits.append("codex: not installed")
 
+    if compress_session_store_root().exists():
+        try:
+            n_compress = sum(
+                1
+                for _ in itertools.islice(
+                    read_compress_sessions(paths, since=None, verbose=True), 400
+                )
+            )
+            bits.append(f"compress: {n_compress} session(s)")
+        except CompressError as e:
+            n_compress = -2
+            bits.append(f"compress: skip ({e})")
+    else:
+        n_compress = 0
+        bits.append("compress: store not found")
+
     dim("Spec Live broadcast · local scan — " + " · ".join(bits))
     dim(
         "Tip: only Cursor Composer / in-editor Agent sessions in this folder "
@@ -411,10 +434,11 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
         n_cursor >= 0
         and n_claude >= 0
         and n_codex >= 0
-        and (n_cursor + n_claude + n_codex) == 0
+        and n_compress >= 0
+        and (n_cursor + n_claude + n_codex + n_compress) == 0
     ):
         warn(
-            "Spec Live: no Cursor / Claude Code / Codex sessions are mapped to "
+            "Spec Live: no Cursor / Claude Code / Codex / Compress sessions are mapped to "
             "this bundle path yet — open this repo (or its parent workspace) in "
             "your agent IDE, start a thread, then restart `spec watch`."
         )
@@ -534,7 +558,12 @@ def run_watcher(
     # opt-out flags reach this path.
     presence_cache = PresenceCache(freshness_secs=PRESENCE_FRESHNESS_SECS)
     team_presence = TeamPresenceMirror(bundle_root)
+    coordination_cache = CoordinationCache(bundle_root)
+    team_coordination = TeamCoordinationMirror(bundle_root)
     last_local_presence: list[LocalPresence] = []  # nonlocal-able mutable handle
+    # Clear a stale projection left by an interrupted prior watcher before
+    # bootstrap replay has a chance to rebuild it from Cloud.
+    team_coordination.sync(coordination_cache)
 
     if opts.broadcast:
         poster = HTTPPoster(
@@ -558,6 +587,12 @@ def run_watcher(
             try:
                 if _live_ev_dedup.is_redelivery(event.id):
                     return
+                # Materialize every prompt event, including this install's
+                # echoes, before terminal echo suppression. The coordination
+                # brief is a project view; hiding our own parallel sessions
+                # there would defeat its purpose.
+                if coordination_cache.apply_event(event):
+                    team_coordination.sync(coordination_cache)
                 if opts.self_user_id is not None and (
                     event.author_user_id == opts.self_user_id
                 ):
@@ -739,6 +774,7 @@ def run_watcher(
                     team_presence,
                     last_local_presence,
                 )
+                team_coordination.sync(coordination_cache)
                 last_team_presence_tick = now
 
             if now - last_save >= CURSOR_SAVE_INTERVAL_SECS:
@@ -1090,7 +1126,7 @@ def _producer_tick(
 
 
 def _iter_local_sessions(paths) -> Iterable[Session]:  # type: ignore[no-untyped-def]
-    """Yield freshly-read local sessions across all three adapters.
+    """Yield freshly-read local sessions across all four adapters.
 
     Each adapter is gated on its store existing — we never error out
     when one isn't installed. ``verbose=True`` ensures assistant turn
@@ -1123,6 +1159,14 @@ def _iter_local_sessions(paths) -> Iterable[Session]:  # type: ignore[no-untyped
             sessions.extend(read_codex_sessions(paths, since=None, verbose=True))
         except CodexError as e:
             log.debug("spec-live: codex adapter skipped: %s", e)
+
+    if compress_session_store_root().exists():
+        try:
+            sessions.extend(
+                read_compress_sessions(paths, since=None, verbose=True)
+            )
+        except CompressError as e:
+            log.debug("spec-live: compress adapter skipped: %s", e)
 
     epoch = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -1213,7 +1257,7 @@ def _build_outgoing(
     return OutgoingEvent(
         session_id=session.id,
         source=session.source if session.source in (
-            "cursor", "codex", "claude_code", "manual"
+            "cursor", "codex", "claude_code", "compress", "manual"
         ) else "manual",
         role=role,
         branch=branch or None,

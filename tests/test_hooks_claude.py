@@ -69,6 +69,25 @@ def _run_hook(stdin_payload: dict, *, args: list[str] | None = None) -> subproce
     )
 
 
+def test_user_prompt_hook_prints_coordination_brief(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    spec_dir = bundle / ".spec"
+    spec_dir.mkdir()
+    (spec_dir / "team-coordination.md").write_text(
+        "# Active agent rounds\n\n- Bob is changing auth.\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        SPEC_BIN + ["hooks", "claude-user-prompt"],
+        cwd=bundle,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "Bob is changing auth" in result.stdout
+
+
 def _stderr_warnings_only(raw: str) -> str:
     """Filter the bookkeeping lines the hook always emits (lock id)
     so legacy tests can keep asserting on user-visible warnings."""

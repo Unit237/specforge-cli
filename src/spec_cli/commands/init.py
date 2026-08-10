@@ -18,6 +18,33 @@ from ..ui import dim, fatal, info, ok, pointer
 
 AGENTS_FILENAME: str = "AGENTS.md"
 
+AGENTS_COORDINATION_BLOCK_BEGIN: str = "<!-- >>> spec live coordination >>>"
+AGENTS_COORDINATION_BLOCK_END: str = "<!-- <<< spec live coordination <<< -->"
+AGENTS_COORDINATION_BLOCK_BODY: str = f"""\
+{AGENTS_COORDINATION_BLOCK_BEGIN}
+## Spec Live — multi-agent coordination
+
+This bundle uses **Spec Live** to coordinate coding agents working in parallel.
+
+Before planning or editing:
+
+1. Read `.spec/team-coordination.md` when it exists. It lists active agent
+   objectives, progress, claimed paths, and recent handoffs.
+2. Do not duplicate an active objective. Split the work, wait for the handoff,
+   or tell the user about the overlap.
+3. Before modifying an existing or potentially shared path, run
+   `spec locks check <bundle-relative-path>`. Exit `0` means clear; exit `2`
+   means another agent may be editing it, so surface the conflict before
+   proceeding.
+4. Report material progress, paths changed, blockers, and the final outcome in
+   normal assistant messages. Spec Live shares those updates automatically.
+
+Treat the coordination brief as advisory and the lock check as the mechanical
+conflict signal. The brief disappears when the last active round finishes, so
+its absence is normal. Never hand-edit files under `.spec/`.
+{AGENTS_COORDINATION_BLOCK_END}
+"""
+
 
 # `.gitignore` block — Spec-managed, idempotent. Re-running `spec init`
 # replaces the block in place via these sentinels; deleting both
@@ -292,7 +319,7 @@ cloud:
   # `cloud.project` at an unrelated bundle by accident is then a hard refusal.
 
   # Spec Live — real-time prompt sharing across the team. Each new
-  # turn in any local Cursor / Codex / Claude Code session is
+  # turn in any local Cursor / Codex / Claude Code / Compress session is
   # redacted, posted to Spec Cloud, and fanned out via SSE to every
   # teammate's `spec watch` daemon. Enabled by default — the team
   # feed lights up the moment a teammate installs the CLI. Toggle
@@ -323,8 +350,13 @@ alwaysApply: true
 
 # Spec Live — check coordination before editing
 
-This bundle uses **Spec Live**. Before you edit any file in this
-project, run:
+This bundle uses **Spec Live**. Before planning or editing, read
+`.spec/team-coordination.md` when it exists. It lists active agent
+objectives, progress, claimed paths, and recent handoffs. Avoid
+duplicating active work. The file is removed automatically when the
+last active round finishes, so absence is normal.
+
+Before you edit any file in this project, run:
 
 ```bash
 spec locks check <bundle-relative-path>
@@ -362,7 +394,8 @@ automatically for Edit / Write / MultiEdit tool calls.
 """
 
 
-_STARTER_AGENTS = """# AGENTS.md — instructions for coding agents in this repo
+_STARTER_AGENTS = (
+    """# AGENTS.md — instructions for coding agents in this repo
 
 This is a **Spec bundle**. The source of truth is plain English in
 `docs/**/*.md` plus the captured conversational history in
@@ -403,25 +436,9 @@ code for this bundle:
   compile.
 - Don't commit `.spec/` — it's local index state.
 
-## Spec Live — checking team presence before file edits
-
-This bundle uses **Spec Live**: when teammates are running
-`spec watch`, their currently-dirty files (and per-file `+/-` line
-counts) are mirrored to `.spec/team-presence.json` and summarized in
-`.spec/team-editing-brief.md`. Before you modify any file in this
-bundle, check whether a teammate already has uncommitted work in it.
-
-The mechanical contract (prefer the locks command — it ignores a
-stale mirror when `spec watch` is not running):
-
-```bash
-spec locks check <bundle-relative-path>
-# exit 0 → clear
-# exit 2 → a teammate is likely editing it (warning printed)
-```
-
-Legacy: `spec presence check` uses the same exit codes without the
-stale-mirror guard.
+"""
+    + AGENTS_COORDINATION_BLOCK_BODY
+    + """
 
 ## Git push handoffs (Spec Live)
 
@@ -459,8 +476,9 @@ A Claude Code `PreToolUse` hook is automatically wired into
 `.claude/settings.json` by `spec init`, so Claude Code does this
 check for you on every `Edit` / `Write` / `MultiEdit` /
 `NotebookEdit`. Other agents (Cursor, Codex, generic LLMs reading
-this file) should call `spec presence check` themselves.
+this file) should call `spec locks check` themselves.
 """
+)
 
 
 def _write_starter_manifest(path: Path, name: str, *, cloud_project: str) -> None:
@@ -475,6 +493,44 @@ def _write_if_missing(path: Path, contents: str) -> bool:
         return False
     path.write_text(contents, encoding="utf-8")
     return True
+
+
+def _install_agents_coordination_block(bundle_root: Path) -> tuple[str, Path]:
+    """Create or refresh only Spec's managed coordination block in AGENTS.md."""
+    path = bundle_root / AGENTS_FILENAME
+    if not path.exists():
+        path.write_text(AGENTS_COORDINATION_BLOCK_BODY, encoding="utf-8")
+        return "installed", path
+
+    existing = path.read_text(encoding="utf-8")
+    has_begin = AGENTS_COORDINATION_BLOCK_BEGIN in existing
+    has_end = AGENTS_COORDINATION_BLOCK_END in existing
+    if has_begin != has_end:
+        raise OSError(
+            "AGENTS.md contains only one Spec Live coordination marker; "
+            "restore or remove the incomplete managed block, then retry"
+        )
+    if has_begin:
+        start = existing.index(AGENTS_COORDINATION_BLOCK_BEGIN)
+        end = existing.index(AGENTS_COORDINATION_BLOCK_END) + len(
+            AGENTS_COORDINATION_BLOCK_END
+        )
+        updated = (
+            existing[:start]
+            + AGENTS_COORDINATION_BLOCK_BODY.rstrip()
+            + existing[end:]
+        )
+        if updated == existing:
+            return "unchanged", path
+        path.write_text(updated, encoding="utf-8")
+        return "updated", path
+
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    path.write_text(
+        existing + separator + "\n" + AGENTS_COORDINATION_BLOCK_BODY,
+        encoding="utf-8",
+    )
+    return "appended", path
 
 
 def _render_starter_prompts(author_name: str, author_email: str) -> str:
@@ -711,7 +767,7 @@ def _stage_scaffold_for_push(
     help=(
         "Refresh Spec Live coordination files only: overwrite "
         "`.cursor/rules/spec-team-presence.mdc` and re-apply the Spec-managed "
-        "Claude Code hook block in `.claude/settings.json`. "
+        "Claude Code hook and `AGENTS.md` blocks. "
         "Does not touch spec.yaml or docs — for CLI upgrades in existing bundles."
     ),
 )
@@ -743,9 +799,14 @@ def init_cmd(
         except OSError as e:
             fatal(f"Could not update Claude settings: {e}")
             return
+        try:
+            _install_agents_coordination_block(bundle_root)
+        except OSError as e:
+            fatal(f"Could not update {AGENTS_FILENAME}: {e}")
+            return
         ok(
             "Spec Live rules refreshed — `.cursor/rules/spec-team-presence.mdc` "
-            "and `.claude/settings.json` (Spec-managed hooks)."
+            "plus Spec-managed `.claude/settings.json` and `AGENTS.md` blocks."
         )
         dim(f"bundle root: {bundle_root}")
         return

@@ -1,18 +1,19 @@
-"""`spec compile` — produce a compile prompt for Claude Code (default),
+"""`spec compile` — produce a compile prompt for a coding agent (default),
 or shell out to `spec-compile` for API-driven compilation.
 
 Design:
 
-Default mode (Claude-Code-first). Assembles a deterministic "compile prompt"
-from the bundle's specs, prompt templates, and `.prompt` sessions, and
+Default mode (agent-first). Assembles a deterministic "compile prompt"
+from the bundle's specs, prompt templates, and `.prompts` sessions, and
 writes it to `.spec/compile-prompt.md`. The project's `AGENTS.md`
-tells Claude Code what to do with that file on the next "compile" request.
+tells the active coding agent what to do with that file on the next
+"compile" request.
 No API keys, no LLM SDKs, no network — the user's existing agent does the
 inference.
 
   $ spec compile
   ✓ compile prompt ready · .spec/compile-prompt.md
-  Open Claude Code here and say "compile".
+  Ask your coding agent to compile this bundle.
 
 API mode. Shells out to `spec-compile` (the sibling compiler package)
 which loads SDKs, calls a model directly, and writes files to `./out`.
@@ -101,7 +102,7 @@ def _run_api_mode(root: Path, extra_args: list[str]) -> int:
         info("Install it, then re-run:")
         info("  pip install spec-compiler")
         info("")
-        info("Or use the default Claude-Code flow:")
+        info("Or use the default coding-agent flow:")
         info("  spec compile")
         return 127
 
@@ -130,11 +131,11 @@ def _run_api_mode(root: Path, extra_args: list[str]) -> int:
 )
 @click.option(
     "--via",
-    type=click.Choice(["claude-code", "api"], case_sensitive=False),
-    default="claude-code",
+    type=click.Choice(["agent", "claude-code", "api"], case_sensitive=False),
+    default="agent",
     help=(
-        "How to run compilation. `claude-code` (default) writes a self-contained "
-        "compile prompt you hand to your running Claude Code session. `api` "
+        "How to run compilation. `agent` (default; `claude-code` remains an alias) "
+        "writes a self-contained compile prompt for your active coding agent. `api` "
         "shells out to `spec-compile` and calls the model directly."
     ),
 )
@@ -149,14 +150,14 @@ def compile_cmd(ctx: click.Context, via: str, to_stdout: bool) -> None:
     """
     Compile this bundle.
 
-    Default (Claude Code): writes `.spec/compile-prompt.md`, which
-    your running Claude Code session will read on the next "compile"
+    Default (coding agent): writes `.spec/compile-prompt.md`, which
+    your active coding agent will read on the next "compile"
     request (see AGENTS.md at the bundle root).
 
     API mode: shells out to `spec-compile` with any extra flags
     forwarded verbatim, e.g.
 
-      spec compile --via api --dry-run --model claude-sonnet-4-5
+      spec compile --via api --dry-run --model gpt-5
     """
     try:
         root = find_bundle_root()
@@ -173,7 +174,7 @@ def compile_cmd(ctx: click.Context, via: str, to_stdout: bool) -> None:
         rc = _run_api_mode(root, list(ctx.args))
         sys.exit(rc)
 
-    # Claude-Code-first path. --stdout and the default write-to-file share
+    # Agent-first path. --stdout and the default write-to-file share
     # the same assembler; only output destination differs.
     if ctx.args:
         # Extra positional args are reserved for `--via api` mode today.
@@ -218,8 +219,16 @@ def compile_cmd(ctx: click.Context, via: str, to_stdout: bool) -> None:
         f"{_prompt_file_count(bundle)} prompt file(s)[/]"
     )
     ok(f"compile prompt ready · {dest.relative_to(root)}")
-    pointer("next", "open Claude Code in this directory and say \"compile\"")
+    pointer("next", "ask your coding agent to compile this bundle")
+    compiler = manifest.data.get("compiler") or {}
+    engine = str(compiler.get("engine") or "anthropic")
+    credential = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "local": "a running OpenAI-compatible local endpoint",
+        "custom": "SPEC_CUSTOM_URL",
+    }.get(engine, "the configured engine credentials")
     dim(
-        "Or: `spec compile --via api` to call an Anthropic model directly "
-        "(requires `spec-compiler` + ANTHROPIC_API_KEY)."
+        f"Or: `spec compile --via api` to use the configured `{engine}` engine "
+        f"(requires `spec-compiler` + {credential})."
     )

@@ -2,13 +2,14 @@
 Adapters that read captured conversational sessions from coding-agent clients
 and normalize them into `spec_cli.prompts.Session` objects.
 
-Three adapters today:
+Four adapters today:
 
   - ``claude_code`` — reads Claude Code's per-project JSONL store.
   - ``cursor``      — reads Cursor Composer (SQLite) plus in-editor Agent JSONL.
   - ``codex``       — reads OpenAI Codex Desktop rollout JSONL only.
+  - ``compress``    — reads Compress terminal-agent session checkpoints.
 
-Both adapters expose a ``read_*_sessions(bundle_paths, *, since,
+All adapters expose a ``read_*_sessions(bundle_paths, *, since,
 verbose)`` entry point. ``bundle_paths`` may be a single ``Path`` or
 an iterable of paths (current root + historical aliases — see
 ``stage.historical_bundle_paths`` for Fix #2). Each adapter handles
@@ -42,12 +43,14 @@ from .cursor import (
     cursor_workspace_storage_root,
     read_cursor_sessions,
 )
+from .compress import CompressError, compress_session_store_root, read_compress_sessions
 
 __all__ = [
     "ClaudeCodeError",
     "CodexError",
     "CodexRecentSession",
     "CursorError",
+    "CompressError",
     "claude_code_project_dir",
     "claude_code_store_root",
     "codex_project_dir",
@@ -56,6 +59,7 @@ __all__ = [
     "codex_transcript_store_available",
     "cursor_global_storage_db",
     "cursor_workspace_storage_root",
+    "compress_session_store_root",
     "encode_bundle_path",
     "iter_cursor_agent_transcript_sessions",
     "list_recent_codex_sessions",
@@ -63,5 +67,6 @@ __all__ = [
     "read_claude_code_sessions",
     "read_codex_sessions",
     "read_cursor_sessions",
+    "read_compress_sessions",
     "redact_text",
 ]
