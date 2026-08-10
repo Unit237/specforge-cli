@@ -47,6 +47,27 @@ Recommended: install [Claude Code](https://claude.ai/code) too. The CLI's
 
 ## Quick start
 
+Already have a folder full of Git repositories? Initialize any or all of them
+from one terminal screen:
+
+```bash
+cd ~/code
+spec discover
+
+# Press Enter (or type `all`) for every uninitialized repo, or enter a
+# selection such as `1,3,5-7`. Existing Spec repos are shown but never changed.
+```
+
+`spec discover --dry-run` is a read-only inventory, and `spec discover --all`
+is the non-interactive form. Discovery recognizes normal clones, worktrees,
+and submodules while skipping dependency, build, cache, and hidden directories.
+It runs the same safe `spec init` scaffold for every selected repository and
+registers each one with the machine-wide workday switch. Local initialization
+does not create Cloud resources; run `spec push` once in a new bundle when you
+want to bind it to Spec Cloud.
+
+For a single new project:
+
 ```bash
 # Scaffold a new bundle
 mkdir billing-service-rewrite && cd billing-service-rewrite
@@ -132,6 +153,7 @@ the compiler sees on the next run — see
 | Command | Purpose |
 |---|---|
 | `spec init` | Scaffold `spec.yaml`, `docs/product.md`, `prompts/scaffold.md`, `prompts/sessions/`, and `AGENTS.md`. |
+| `spec discover [ROOT]` | Find Git repositories under a workspace, show their Spec status, and interactively initialize any or all uninitialized repos. Use `--dry-run` to inventory and `--all` for automation. |
 | `spec status` | Git-like sections: staged for push, modified (out-of-date snapshot vs not staged), untracked, etc. |
 | `spec add <paths…>` | Stage files. Rejects non-spec extensions explicitly. |
 | `spec push [URL]` | Upload the staged snapshot to Cloud, in 10-file batches. Accepts a `git`-style URL (see below). |
@@ -190,10 +212,10 @@ spec off      # end of day: cleanly stop all watchers and release local locks
 ```
 
 `spec on` learns the current bundle, remembers every bundle seen through
-`spec init` / `spec watch` / `spec live start`, and restarts those known bundle
-watchers idempotently. `spec off` mutes this machine before stopping them, so a
-shell hook cannot race the shutdown. It controls local coordination only;
-cloud-side PR jobs are configured and run separately.
+`spec init` / `spec discover` / `spec watch` / `spec live start`, and restarts
+those known bundle watchers idempotently. `spec off` mutes this machine before
+stopping them, so a shell hook cannot race the shutdown. It controls local
+coordination only; cloud-side PR jobs are configured and run separately.
 
 Only Cloud-bound bundles (a manifest with both `cloud.project` and the
 server-minted `cloud.bundle_id`) get a watcher. Local examples and fresh

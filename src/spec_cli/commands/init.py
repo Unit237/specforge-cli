@@ -897,6 +897,13 @@ def init_cmd(
     # asked to compile. Written only if missing to respect pre-existing
     # project conventions.
     agents_written = _write_if_missing(root / AGENTS_FILENAME, _STARTER_AGENTS)
+    agents_coordination_status: str | None = None
+    if not agents_written:
+        try:
+            agents_coordination_status, _ = _install_agents_coordination_block(root)
+        except OSError as e:
+            info("")
+            dim(f"Could not update {AGENTS_FILENAME} ({e}). Skipping.")
 
     # Spec Live integrations for AI IDEs:
     #   * `.cursor/rules/spec-team-presence.mdc` — universal "always
@@ -969,7 +976,9 @@ def init_cmd(
         root,
         wrote_prompts=wrote_prompts,
         starter_prompts_name=starter_prompts_name,
-        agents_written=agents_written,
+        agents_written=(
+            agents_written or agents_coordination_status in {"appended", "updated"}
+        ),
     )
     remember_bundle(root)
 
@@ -985,8 +994,13 @@ def init_cmd(
         pointer("  starter   ", f"{PROMPTS_DIRNAME}/{starter_prompts_name}")
     if agents_written:
         pointer("agents      ", "AGENTS.md")
+    elif agents_coordination_status in {"appended", "updated"}:
+        pointer(
+            "agents      ",
+            f"AGENTS.md ({agents_coordination_status} Spec coordination block)",
+        )
     else:
-        dim("AGENTS.md already exists — left untouched.")
+        dim("AGENTS.md already contains current Spec coordination instructions.")
     if cursor_rule_written:
         try:
             rel = cursor_rule_path.relative_to(root)
