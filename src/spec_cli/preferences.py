@@ -148,7 +148,11 @@ class Preferences:
 
     def save(self) -> Path:
         path = _prefs_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log.info("spec-prefs: could not create %s: %s", path.parent, e)
+            return path
         try:
             os.chmod(path.parent, stat.S_IRWXU)  # 0700
         except OSError:
@@ -160,11 +164,15 @@ class Preferences:
         merged["autostart"] = self.autostart
         merged["bundles"] = list(dict.fromkeys(self.bundles))
 
-        tmp_fd, tmp_name = tempfile.mkstemp(
-            prefix=f"{PREFERENCES_FILENAME}.",
-            suffix=".tmp",
-            dir=str(path.parent),
-        )
+        try:
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                prefix=f"{PREFERENCES_FILENAME}.",
+                suffix=".tmp",
+                dir=str(path.parent),
+            )
+        except OSError as e:
+            log.info("spec-prefs: could not create temp file in %s: %s", path.parent, e)
+            return path
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(merged, f, indent=2)

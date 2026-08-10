@@ -50,6 +50,23 @@ def test_remember_bundle_is_idempotent(tmp_path, monkeypatch):
     assert load_preferences().bundles == [str(root.resolve())]
 
 
+def test_remember_bundle_fails_open_when_preferences_directory_is_read_only(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+    root = _bundle(tmp_path)
+
+    def deny_tempfile(*args, **kwargs):
+        raise PermissionError("read-only preferences directory")
+
+    monkeypatch.setattr("spec_cli.preferences.tempfile.mkstemp", deny_tempfile)
+
+    # Bundle registration is housekeeping; it must never break init/watch.
+    assert remember_bundle(root).bundles == [str(root.resolve())]
+    assert not (tmp_path / "spec-home" / "preferences.json").exists()
+
+
 def test_spec_on_enables_preferences_registers_current_and_starts(
     tmp_path,
     monkeypatch,
