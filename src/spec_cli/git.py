@@ -35,6 +35,12 @@ _REPO_NAME_RE = re.compile(
     re.VERBOSE,
 )
 
+_GITHUB_REPOSITORY_RE = re.compile(
+    r"^(?:https?://github\.com/|ssh://git@github\.com/|git@github\.com:)"
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class GitContext:
@@ -48,6 +54,8 @@ class GitContext:
     commit_sha: str | None = None
     author_name: str | None = None
     author_email: str | None = None
+    origin_url: str | None = None
+    github_repository: str | None = None
     is_repo: bool = False
 
 
@@ -166,6 +174,8 @@ def read_git_context(root: Path) -> GitContext:
 
     ctx.author_name = _run_git(["config", "user.name"], cwd=root)
     ctx.author_email = _run_git(["config", "user.email"], cwd=root)
+    ctx.origin_url = read_origin_url(root)
+    ctx.github_repository = github_full_name_from_remote_url(ctx.origin_url)
 
     return ctx
 
@@ -184,6 +194,25 @@ def repo_name_from_remote_url(url: str | None) -> str | None:
     if not name or name in (".", "..", ".git"):
         return None
     return name
+
+
+def github_full_name_from_remote_url(url: str | None) -> str | None:
+    """Return ``owner/repository`` for a github.com origin URL.
+
+    Repository binding is intentionally narrower than generic repo-name
+    inference: non-GitHub remotes and malformed paths return ``None`` so the
+    CLI never asserts a provider identity it cannot prove from the remote.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    match = _GITHUB_REPOSITORY_RE.fullmatch(url.strip())
+    if not match:
+        return None
+    owner = match.group("owner")
+    repository = match.group("repo")
+    if owner in (".", "..") or repository in (".", "..", ".git"):
+        return None
+    return f"{owner}/{repository}"
 
 
 def read_origin_url(root: Path) -> str | None:
@@ -246,6 +275,7 @@ __all__ = [
     "GitContext",
     "commit_gpgsign_enabled",
     "find_git_dir",
+    "github_full_name_from_remote_url",
     "pending_commit_parents",
     "predict_commit_object_sha",
     "read_git_context",

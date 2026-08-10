@@ -451,7 +451,10 @@ def push_cmd(
         for chunk in _chunk(payload, MAX_BATCH_SIZE):
             try:
                 result = client.batch_upload(
-                    project_id, chunk, bundle_id=push_bundle_id
+                    project_id,
+                    chunk,
+                    bundle_id=push_bundle_id,
+                    github_repository=git.github_repository,
                 )
             except ApiError as e:
                 # Surface the server-side bundle-identity mismatch as a
@@ -473,6 +476,13 @@ def push_cmd(
                             f"  Update `cloud.bundle_id` in spec.yaml or "
                             f"point at the right remote."
                         )
+                        return
+                    if isinstance(detail, dict) and detail.get("error") in {
+                        "github_repository_not_mirrored",
+                        "github_repository_mismatch",
+                        "github_repository_already_bound",
+                    }:
+                        fatal(str(detail.get("message") or "GitHub repository binding failed"))
                         return
                 fatal(str(e))
                 return
@@ -568,7 +578,10 @@ def push_cmd(
     # `spec.yaml`). Pushes on the default branch never open a review.
     default_branch = project_info.get("default_branch") or "main"
     on_trunk = (git.branch is None) or (git.branch == default_branch)
-    if not no_review and total_accepted and not on_trunk:
+    github_canonical = bool(
+        project_info.get("github_repository") or git.github_repository
+    )
+    if not no_review and total_accepted and not on_trunk and not github_canonical:
         title = (git.commit_sha and _title_from_commit(root)) or None
         try:
             review = client.open_branch_review(
@@ -598,6 +611,11 @@ def push_cmd(
                 ok(f"review open on [bold]{git.branch}[/] · {review_url}")
         else:
             dim(f"branch `{git.branch}` review state: {review.get('status')}")
+    elif not no_review and total_accepted and not on_trunk and github_canonical:
+        dim(
+            "GitHub is canonical for this bundle; open or update the pull "
+            "request there. Spec will mirror its review lifecycle automatically."
+        )
 
     if total_rejected:
         raise SystemExit(1)

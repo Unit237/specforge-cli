@@ -193,3 +193,56 @@ def test_push_canonicalizes_bare_cloud_project(
     assert r.exit_code == 0
     data = yaml.safe_load((root / "spec.yaml").read_text(encoding="utf-8"))
     assert data["cloud"]["project"] == "alice/my-bundle"
+
+
+def test_push_binds_github_origin_and_defers_review_to_github(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    root = tmp_path / "github"
+    _bundle(root, cloud_project="alice/my-bundle")
+    _fake_git_main(root)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:Unit237/specforge.git"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True)
+    subprocess.run(["git", "switch", "-c", "agent/github-sync"], cwd=root, check=True)
+    monkeypatch.chdir(root)
+
+    runner = CliRunner()
+    runner.invoke(cli, ["add", ".", "--no-capture"], catch_exceptions=False)
+
+    client = MagicMock()
+    client.resolve_project.return_value = {
+        "id": 88,
+        "slug": "my-bundle",
+        "owner_handle": "alice",
+        "bundle_id": "bdl_github",
+        "default_branch": "main",
+    }
+
+    def _batch(_project_id: int, chunk: list, **_kwargs):
+        return {"results": [{"ok": True, "path": item["path"]} for item in chunk]}
+
+    client.batch_upload.side_effect = _batch
+    creds = Credentials(
+        api_base="https://spec.example",
+        access_token="tok",
+        user_handle="alice",
+    )
+    monkeypatch.setattr("spec_cli.commands.push.load_credentials", lambda: creds)
+
+    with patch("spec_cli.commands.push.CloudClient", return_value=client):
+        result = runner.invoke(cli, ["push"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert any(
+        call.kwargs.get("github_repository") == "Unit237/specforge"
+        for call in client.batch_upload.call_args_list
+    )
+    client.open_branch_review.assert_not_called()
+    assert "GitHub is canonical" in result.output
