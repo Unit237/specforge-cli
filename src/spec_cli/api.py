@@ -187,6 +187,7 @@ class CloudClient:
         items: Iterable[dict[str, Any]],
         *,
         bundle_id: str | None = None,
+        github_repository: str | None = None,
     ) -> dict[str, Any]:
         """
         `items` are {"path": str, "content": str, "branch": str|None,
@@ -201,10 +202,17 @@ class CloudClient:
         immutable id and returns ``409`` if they differ — that's the
         durable backstop against retargeting a working tree at the wrong
         bundle. Older servers ignore the field (forward-compatible).
+
+        ``github_repository`` is the ``owner/name`` parsed from the git
+        origin. A GitHub-aware server binds the bundle to its already-mirrored
+        immutable repository id and refuses a conflicting or unauthorized
+        origin. It is omitted outside a github.com worktree.
         """
         payload: dict[str, Any] = {"files": list(items)}
         if bundle_id is not None:
             payload["bundle_id"] = bundle_id
+        if github_repository is not None:
+            payload["github_repository"] = github_repository
         return self._request(
             "POST",
             f"/api/projects/{project_id}/files/batch",
