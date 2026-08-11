@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
 from dataclasses import replace
+from pathlib import Path
 
 import click
 
@@ -11,6 +15,7 @@ from ..api import ApiError, CloudClient
 from ..config import (
     BundleNotFoundError,
     RemoteUrlError,
+    discover_bundle_roots_under_cwd,
     dump_manifest,
     find_bundle_root,
     load_credentials,
@@ -20,6 +25,7 @@ from ..config import (
 )
 from ..constants import MAX_BATCH_SIZE
 from ..git import read_git_context
+from ..preferences import load_preferences, remember_bundle
 from ..stage import (
     InvalidBundleError,
     assert_push_invariants,
@@ -29,7 +35,7 @@ from ..stage import (
     save_index,
     sha256,
 )
-from ..ui import console, dim, fatal, ok, reject, warn
+from ..ui import console, dim, fatal, info, ok, reject, warn
 
 
 def _cloud_slugify(name: str) -> str:
@@ -79,6 +85,100 @@ def _chunk(seq, n):
         yield buf
 
 
+def collect_push_all_roots(search_root: Path | None = None) -> list[Path]:
+    """Return every usable bundle known to this machine or below the cwd.
+
+    The preference registry makes ``spec push --all`` work from any directory
+    after ``spec init`` / ``spec discover``. The cwd scan also picks up older
+    bundles that pre-date the registry, and the containing-bundle lookup keeps
+    the command intuitive when it is launched from a nested source directory.
+    """
+    here = (search_root or Path.cwd()).expanduser().resolve()
+    candidates = {
+        Path(raw).expanduser().resolve()
+        for raw in load_preferences().bundles
+        if isinstance(raw, str) and raw
+    }
+    candidates.update(discover_bundle_roots_under_cwd(here))
+    try:
+        candidates.add(find_bundle_root(here).resolve())
+    except BundleNotFoundError:
+        pass
+
+    roots = sorted(
+        (root for root in candidates if (root / "spec.yaml").is_file()),
+        key=lambda root: str(root).lower(),
+    )
+    for root in roots:
+        remember_bundle(root)
+    return roots
+
+
+def run_push_for_bundle(
+    root: Path,
+    *,
+    dry_run: bool,
+    no_review: bool,
+    reviewers: tuple[str, ...],
+) -> int:
+    """Run one ordinary push in ``root`` and return its process exit code."""
+    args = [sys.executable, "-m", "spec_cli", "push"]
+    if dry_run:
+        args.append("--dry-run")
+    if no_review:
+        args.append("--no-review")
+    for reviewer in reviewers:
+        args.extend(["--reviewer", reviewer])
+
+    env = os.environ.copy()
+    env["SPEC_BUNDLE_ROOT"] = str(root.resolve())
+    package_root = str(Path(__file__).resolve().parents[2])
+    prior_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        package_root
+        if not prior_pythonpath
+        else package_root + os.pathsep + prior_pythonpath
+    )
+    result = subprocess.run(args, cwd=root, env=env, check=False)
+    return result.returncode
+
+
+def _push_all_bundles(
+    *,
+    dry_run: bool,
+    no_review: bool,
+    reviewers: tuple[str, ...],
+) -> None:
+    roots = collect_push_all_roots()
+    if not roots:
+        fatal(
+            "No registered Spec bundles found. Run `spec discover --all` "
+            "or `spec init` first."
+        )
+        return
+
+    failures: list[Path] = []
+    for position, root in enumerate(roots, start=1):
+        info("")
+        info(f"[{position}/{len(roots)}] Pushing {root}")
+        if run_push_for_bundle(
+            root,
+            dry_run=dry_run,
+            no_review=no_review,
+            reviewers=reviewers,
+        ):
+            failures.append(root)
+
+    info("")
+    if failures:
+        warn(
+            f"Push failed for {len(failures)} of {len(roots)} bundles: "
+            + ", ".join(str(root) for root in failures)
+        )
+        raise SystemExit(1)
+    ok(f"Processed all {len(roots)} registered Spec bundles.")
+
+
 @click.command("push")
 @click.argument("remote_url", required=False, metavar="[URL]")
 @click.option(
@@ -89,6 +189,12 @@ def _chunk(seq, n):
     "or a bare slug (uses your handle from saved credentials).",
 )
 @click.option("--dry-run", is_flag=True, help="Show what would be pushed, don't upload.")
+@click.option(
+    "--all",
+    "push_all",
+    is_flag=True,
+    help="Push every registered or locally discovered Spec bundle.",
+)
 @click.option(
     "--no-review",
     is_flag=True,
@@ -116,6 +222,7 @@ def push_cmd(
     remote_url: str | None,
     project: str | None,
     dry_run: bool,
+    push_all: bool,
     no_review: bool,
     reviewers: tuple[str, ...],
 ) -> None:
@@ -139,7 +246,22 @@ def push_cmd(
     upserts on `(project, branch, status='open')`). Use `--no-review`
     to opt out and `--reviewer email@example.com` to request specific
     reviewers up-front.
+
+    Pass `--all` to run the same push independently for every Spec bundle
+    registered on this machine. Failures do not stop later bundles; the command
+    exits non-zero after printing a complete summary when any push fails.
     """
+    if push_all:
+        if remote_url or project:
+            fatal("`spec push --all` cannot be combined with a URL or --project.")
+            return
+        _push_all_bundles(
+            dry_run=dry_run,
+            no_review=no_review,
+            reviewers=reviewers,
+        )
+        return
+
     try:
         root = find_bundle_root()
     except BundleNotFoundError as e:

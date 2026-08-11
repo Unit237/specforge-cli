@@ -20,10 +20,14 @@ the case where Cursor's agent is rewriting ``auth.py`` while Claude
 Code is *also* applying an Edit to the same line range. The user
 notices only after the second agent stomps on the first's diff.
 
-This module owns a small per-bundle file, ``.spec/active-edits.json``,
-that records short-lived **lock entries** keyed by ``(agent,
-session_id, paths)``. Each entry has a TTL (default 5 minutes) so a
-crashed agent never holds a lock forever. Acquire / release flow:
+This module owns one machine-wide file, ``~/.spec/active-edits.json``
+(or ``$SPEC_HOME/active-edits.json``), that records short-lived **lock
+entries** keyed by ``(bundle_root, agent, session_id, paths)``. A single
+file lets every local Codex, Claude, Cursor, and Compress process share
+the same lock registry while the bundle namespace prevents unrelated
+``src/app.py`` paths in different repositories from conflicting. Each
+entry has a TTL (default 5 minutes) so a crashed agent never holds a lock
+forever. Acquire / release flow:
 
 * Before a write tool call, the agent's pre-tool hook calls
   :py:meth:`ActiveEditsStore.acquire` with the file paths it's about
@@ -36,12 +40,13 @@ crashed agent never holds a lock forever. Acquire / release flow:
 
 The file is **never** broadcast to teammates over the network. It is
 strictly a local-machine coordination mechanism. The on-disk schema is
-versioned (``schema: 1``) so future shape changes are detectable.
+versioned (``schema: 2``) so future shape changes are detectable. Legacy
+per-bundle files are imported once and left untouched.
 
 Cross-process correctness:
 
 * Reads + writes go through ``fcntl.flock`` on
-  ``.spec/active-edits.lock`` so two agents writing at the same
+  ``~/.spec/active-edits.lock`` so two agents writing at the same
   instant serialise.
 * The data file is replaced atomically (write-temp + rename), matching
   ``team-presence.json`` and ``LiveCursor``.
@@ -56,6 +61,7 @@ import logging
 import os
 import platform
 import socket
+import stat
 import tempfile
 import threading
 import time
@@ -71,7 +77,9 @@ log = logging.getLogger(__name__)
 ACTIVE_EDITS_DIR = ".spec"
 ACTIVE_EDITS_FILENAME = "active-edits.json"
 ACTIVE_EDITS_LOCKFILE = "active-edits.lock"
-ACTIVE_EDITS_SCHEMA_VERSION = 1
+ACTIVE_EDITS_SCHEMA_VERSION = 2
+
+_GLOBAL_ACTIVE_EDITS_THREAD_LOCK = threading.Lock()
 
 # Default lock duration. Long enough to span a multi-edit tool chain
 # (Claude / Cursor can spend a minute on a big refactor), short enough
@@ -134,6 +142,7 @@ class ActiveEditLock:
     expires_at: datetime
     intent: str | None = None
     note: str | None = None
+    bundle_root: str = ""
 
     # ── lifecycle helpers ─────────────────────────────────────────
 
@@ -155,6 +164,7 @@ class ActiveEditLock:
         """Serialise to the on-disk shape. Always uses ISO-8601 UTC."""
         return {
             "id": self.id,
+            "bundle_root": self.bundle_root,
             "paths": list(self.paths),
             "agent": self.agent,
             "session_id": self.session_id,
@@ -194,6 +204,10 @@ class ActiveEditLock:
             intent = str(intent) if isinstance(intent, str) and intent else None
             note = raw.get("note")
             note = str(note) if isinstance(note, str) and note else None
+            bundle_root = raw.get("bundle_root")
+            bundle_root = (
+                str(bundle_root) if isinstance(bundle_root, str) and bundle_root else ""
+            )
         except (KeyError, TypeError, ValueError):
             return None
         return cls(
@@ -207,6 +221,7 @@ class ActiveEditLock:
             expires_at=expires_at,
             intent=intent,
             note=note,
+            bundle_root=bundle_root,
         )
 
 
@@ -229,22 +244,24 @@ class ActiveEditConflict:
 
 
 class ActiveEditsStore:
-    """Read / mutate ``.spec/active-edits.json`` with cross-process safety.
+    """Read / mutate the machine-wide active-edit registry safely.
 
-    One instance per ``(bundle_root)``. Methods are thread-safe within
-    the process and serialised across processes via an OS-level
-    ``flock`` on the sibling ``.spec/active-edits.lock``.
+    Instances remain bundle-scoped at the API layer, but every instance
+    reads and writes the same ``$SPEC_HOME/active-edits.json``. Methods are
+    serialised within the process and across processes; individual rows carry
+    ``bundle_root`` so equal relative paths in different repos never collide.
     """
 
     def __init__(self, bundle_root: Path) -> None:
         self._bundle_root = bundle_root.resolve()
-        self._spec_dir = self._bundle_root / ACTIVE_EDITS_DIR
+        self._bundle_key = str(self._bundle_root)
+        self._spec_dir = _active_edits_home()
         self._path = self._spec_dir / ACTIVE_EDITS_FILENAME
         self._lockfile = self._spec_dir / ACTIVE_EDITS_LOCKFILE
-        # Intra-process serialisation: every method takes this before
-        # entering the flock'd region, so two threads in the same
-        # process don't both wait on flock with stale state.
-        self._lock = threading.Lock()
+        self._legacy_path = (
+            self._bundle_root / ACTIVE_EDITS_DIR / ACTIVE_EDITS_FILENAME
+        )
+        self._lock = _GLOBAL_ACTIVE_EDITS_THREAD_LOCK
 
     @property
     def path(self) -> Path:
@@ -264,17 +281,28 @@ class ActiveEditsStore:
         True (``spec locks list --include-expired`` for debugging
         / ``prune`` previewing).
         """
-        body = self._read()
         ref = now or datetime.now(timezone.utc)
-        out: list[ActiveEditLock] = []
-        for raw in body.get("locks") or []:
-            lock = ActiveEditLock.from_json(raw)
-            if lock is None:
-                continue
-            if not include_expired and lock.is_expired(now=ref):
-                continue
-            out.append(lock)
-        return out
+        with self._lock, _flock(self._lockfile):
+            return self._list_locked(
+                include_expired=include_expired,
+                now=ref,
+                all_bundles=False,
+            )
+
+    def list_all(
+        self,
+        *,
+        include_expired: bool = False,
+        now: datetime | None = None,
+    ) -> list[ActiveEditLock]:
+        """Every lock in the machine registry, across all Spec bundles."""
+        ref = now or datetime.now(timezone.utc)
+        with self._lock, _flock(self._lockfile):
+            return self._list_locked(
+                include_expired=include_expired,
+                now=ref,
+                all_bundles=True,
+            )
 
     def holders_for(
         self,
@@ -350,12 +378,17 @@ class ActiveEditsStore:
             existing = [
                 lock
                 for lock in existing
-                if not _is_same_caller(lock, agent=agent, session_id=session_id)
+                if not (
+                    self._belongs_to_bundle(lock)
+                    and _is_same_caller(lock, agent=agent, session_id=session_id)
+                )
             ]
 
             conflicts: list[ActiveEditConflict] = []
             requested = set(rel_paths)
             for lock in existing:
+                if not self._belongs_to_bundle(lock):
+                    continue
                 overlap = sorted(set(lock.paths) & requested)
                 if overlap:
                     conflicts.append(
@@ -373,6 +406,7 @@ class ActiveEditsStore:
                 expires_at=expires,
                 intent=intent,
                 note=note,
+                bundle_root=self._bundle_key,
             )
             existing.append(new_lock)
 
@@ -424,7 +458,11 @@ class ActiveEditsStore:
                 lock = ActiveEditLock.from_json(raw)
                 if lock is None:
                     continue
-                if _is_same_caller(lock, agent=agent, session_id=session_id):
+                if self._belongs_to_bundle(lock) and _is_same_caller(
+                    lock,
+                    agent=agent,
+                    session_id=session_id,
+                ):
                     removed += 1
                     continue
                 kept.append(lock)
@@ -461,11 +499,34 @@ class ActiveEditsStore:
 
     # ── internals ─────────────────────────────────────────────────
 
+    def _belongs_to_bundle(self, lock: ActiveEditLock) -> bool:
+        return lock.bundle_root == self._bundle_key
+
+    def _list_locked(
+        self,
+        *,
+        include_expired: bool,
+        now: datetime,
+        all_bundles: bool,
+    ) -> list[ActiveEditLock]:
+        body = self._read_locked()
+        out: list[ActiveEditLock] = []
+        for raw in body.get("locks") or []:
+            lock = ActiveEditLock.from_json(raw)
+            if lock is None:
+                continue
+            if not all_bundles and not self._belongs_to_bundle(lock):
+                continue
+            if not include_expired and lock.is_expired(now=now):
+                continue
+            out.append(lock)
+        return out
+
     def _read(self) -> dict:
         if not self._path.is_file():
             return {}
         try:
-            return json.loads(self._path.read_text(encoding="utf-8")) or {}
+            body = json.loads(self._path.read_text(encoding="utf-8")) or {}
         except (OSError, ValueError) as e:
             log.info(
                 "spec-live: ignoring malformed active-edits at %s: %s",
@@ -473,26 +534,70 @@ class ActiveEditsStore:
                 e,
             )
             return {}
+        return body if isinstance(body, dict) else {}
 
     def _read_locked(self) -> dict:
-        # Called from inside the flock; same as _read but the caller
-        # already owns the cross-process lock.
-        return self._read()
+        """Read the global file and import this bundle's legacy file once."""
+        body = self._read()
+        migrated = _string_list(body.get("migrated_bundle_roots"))
+        if self._bundle_key in migrated or not self._legacy_path.is_file():
+            return body
+
+        locks: list[ActiveEditLock] = []
+        ids: set[str] = set()
+        for raw in body.get("locks") or []:
+            lock = ActiveEditLock.from_json(raw)
+            if lock is None or lock.id in ids:
+                continue
+            locks.append(lock)
+            ids.add(lock.id)
+
+        legacy = _read_json_file(self._legacy_path)
+        for raw in legacy.get("locks") or []:
+            lock = ActiveEditLock.from_json(raw)
+            if lock is None or lock.id in ids:
+                continue
+            lock.bundle_root = self._bundle_key
+            locks.append(lock)
+            ids.add(lock.id)
+
+        migrated.append(self._bundle_key)
+        now = datetime.now(timezone.utc)
+        self._write_locked(
+            locks,
+            now=now,
+            migrated_bundle_roots=migrated,
+        )
+        return {
+            "schema": ACTIVE_EDITS_SCHEMA_VERSION,
+            "updated_at": _iso(now),
+            "migrated_bundle_roots": migrated,
+            "locks": [lock.to_json() for lock in locks],
+        }
 
     def _write_locked(
         self,
         locks: list[ActiveEditLock],
         *,
         now: datetime,
+        migrated_bundle_roots: list[str] | None = None,
     ) -> None:
         try:
             self._spec_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             log.info("spec-live: cannot mkdir %s: %s", self._spec_dir, e)
             return
+        try:
+            os.chmod(self._spec_dir, stat.S_IRWXU)
+        except OSError:
+            pass
+        migrated = migrated_bundle_roots
+        if migrated is None:
+            migrated = _string_list(self._read().get("migrated_bundle_roots"))
         body = {
             "schema": ACTIVE_EDITS_SCHEMA_VERSION,
             "updated_at": _iso(now),
+            "migrated_bundle_roots": migrated,
             "locks": [lock.to_json() for lock in locks],
         }
         encoded = json.dumps(body, indent=2, sort_keys=True)
@@ -510,6 +615,10 @@ class ActiveEditsStore:
                 except OSError:
                     pass
             os.replace(tmp_name, self._path)
+            try:
+                os.chmod(self._path, stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:
+                pass
         except OSError as e:
             log.info("spec-live: active-edits save failed: %s", e)
             try:
@@ -519,6 +628,29 @@ class ActiveEditsStore:
 
 
 # ── module helpers ─────────────────────────────────────────────────
+
+
+def _active_edits_home() -> Path:
+    override = os.environ.get("SPEC_HOME")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".spec"
+
+
+def _read_json_file(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        body = json.loads(path.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _string_list(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return list(dict.fromkeys(value for value in raw if isinstance(value, str) and value))
 
 
 def _iso(value: datetime) -> str:
@@ -620,13 +752,15 @@ def _flock(lock_path: Path) -> Iterator[None]:
 
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(lock_path.parent, stat.S_IRWXU)
     except OSError:
         # No bundle dir — caller will fail on the actual write too.
         yield
         return
 
     try:
-        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        os.chmod(lock_path, stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
         yield
         return
@@ -653,7 +787,7 @@ def _busy_lock(lock_path: Path, *, timeout_secs: float = 2.0) -> None:
     deadline = time.monotonic() + max(0.1, timeout_secs)
     while time.monotonic() < deadline:
         try:
-            fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
+            fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
             os.close(fd)
             return
         except FileExistsError:

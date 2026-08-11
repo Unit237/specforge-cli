@@ -93,8 +93,8 @@ def locks_check_cmd(path: str, quiet: bool, include_self: bool, as_json: bool) -
             click.echo(json.dumps({"clear": True, "reason": "outside_bundle"}))
         sys.exit(0)
 
-    # Single-user, multi-agent locks live in a *different* file
-    # (``.spec/active-edits.json``) and exist precisely to coordinate
+    # Single-user, multi-agent locks live in a *different* machine file
+    # (``~/.spec/active-edits.json``) and exist precisely to coordinate
     # between Claude Code, Cursor, Codex etc. running side-by-side
     # on one machine. We read them **first**, before consulting the
     # team-presence mirror, because the active-edits layer has no
@@ -425,6 +425,7 @@ def _active_lock_to_holder(lock: ActiveEditLock) -> dict:
         "handle": f"you ({lock.agent})",
         "intent": lock.intent,
         "expires_at": lock.expires_at.isoformat(),
+        "bundle_root": lock.bundle_root,
         "self": True,
     }
 
@@ -509,8 +510,9 @@ def locks_acquire_cmd(
 ) -> None:
     """Take a lock on one or more files for this agent.
 
-    The lock lives in ``.spec/active-edits.json`` (local-only, never
-    broadcast). Use it from a PreToolUse hook so other agents on
+    The lock lives in ``~/.spec/active-edits.json`` (local-only, never
+    broadcast) and is namespaced by this bundle root. Use it from a
+    PreToolUse hook so other agents on
     the same machine see your edit in flight before they try the
     same file. Same agent + session re-acquires extend the lock
     (renewal); cross-agent overlaps return as ``conflicts``.
@@ -541,11 +543,15 @@ def locks_acquire_cmd(
         rel = _bundle_relative_path(raw, root)
         if rel is None:
             if as_json:
-                click.echo(json.dumps({
-                    "acquired": False,
-                    "reason": "path_outside_bundle",
-                    "path": raw,
-                }))
+                click.echo(
+                    json.dumps(
+                        {
+                            "acquired": False,
+                            "reason": "path_outside_bundle",
+                            "path": raw,
+                        }
+                    )
+                )
             else:
                 fatal(f"path is outside the bundle: {raw}")
             sys.exit(1)
@@ -564,6 +570,7 @@ def locks_acquire_cmd(
     conflict_payload = [
         {
             "lock_id": c.lock.id,
+            "bundle_root": c.lock.bundle_root,
             "agent": c.lock.agent,
             "session_id": c.lock.session_id,
             "intent": c.lock.intent,
@@ -575,15 +582,20 @@ def locks_acquire_cmd(
     ]
 
     if as_json:
-        click.echo(json.dumps({
-            "acquired": True,
-            "lock_id": lock.id,
-            "paths": list(lock.paths),
-            "agent": lock.agent,
-            "session_id": lock.session_id,
-            "expires_at": lock.expires_at.isoformat(),
-            "conflicts": conflict_payload,
-        }))
+        click.echo(
+            json.dumps(
+                {
+                    "acquired": True,
+                    "lock_id": lock.id,
+                    "bundle_root": lock.bundle_root,
+                    "paths": list(lock.paths),
+                    "agent": lock.agent,
+                    "session_id": lock.session_id,
+                    "expires_at": lock.expires_at.isoformat(),
+                    "conflicts": conflict_payload,
+                }
+            )
+        )
     else:
         ok(
             f"acquired lock {lock.id[:8]} on "
@@ -625,9 +637,9 @@ def locks_release_cmd(lock_id: str, as_json: bool) -> None:
     try:
         root = find_bundle_root()
     except BundleNotFoundError:
-        if as_json:
-            click.echo(json.dumps({"released": False, "reason": "not_in_bundle"}))
-        sys.exit(0)
+        # IDs are globally unique, so release remains useful from outside
+        # the original bundle (for example during machine cleanup).
+        root = Path.cwd()
     store = ActiveEditsStore(root)
     removed = store.release(lock_id)
     if as_json:
@@ -645,6 +657,12 @@ def locks_release_cmd(lock_id: str, as_json: bool) -> None:
     "--include-expired",
     is_flag=True,
     help="Also show expired locks (useful when debugging stale state).",
+)
+@click.option(
+    "--all",
+    "all_bundles",
+    is_flag=True,
+    help="Show locks for every Spec bundle in the machine-wide registry.",
 )
 @click.option(
     "--agent",
@@ -667,13 +685,14 @@ def locks_release_cmd(lock_id: str, as_json: bool) -> None:
 )
 def locks_list_cmd(
     include_expired: bool,
+    all_bundles: bool,
     agent: str | None,
     session_id: str | None,
     as_json: bool,
 ) -> None:
-    """Show every active edit lock for this bundle.
+    """Show active edit locks for this bundle or the whole machine.
 
-    These are local-only and live in ``.spec/active-edits.json``. A
+    These are local-only and live in ``~/.spec/active-edits.json``. A
     fresh ``spec watch`` doesn't need to be running for this — the
     file is written synchronously by each ``spec locks acquire`` and
     ``spec locks release`` call.
@@ -681,14 +700,19 @@ def locks_list_cmd(
     try:
         root = find_bundle_root()
     except BundleNotFoundError:
-        if as_json:
-            click.echo(json.dumps({"locks": [], "reason": "not_in_bundle"}))
-        else:
-            dim("not inside a Spec bundle; no active-edits to list.")
-        sys.exit(0)
+        if not all_bundles:
+            if as_json:
+                click.echo(json.dumps({"locks": [], "reason": "not_in_bundle"}))
+            else:
+                dim("not inside a Spec bundle; pass `--all` for machine locks.")
+            sys.exit(0)
+        root = Path.cwd()
 
     store = ActiveEditsStore(root)
-    locks = store.list(include_expired=include_expired)
+    if all_bundles:
+        locks = store.list_all(include_expired=include_expired)
+    else:
+        locks = store.list(include_expired=include_expired)
     if agent:
         locks = [
             lk for lk in locks
@@ -704,6 +728,7 @@ def locks_list_cmd(
                     "locks": [
                         {
                             "id": lk.id,
+                            "bundle_root": lk.bundle_root,
                             "paths": list(lk.paths),
                             "agent": lk.agent,
                             "session_id": lk.session_id,
@@ -735,6 +760,8 @@ def locks_list_cmd(
             f"[sf.muted]· pid[/] {lk.pid} "
             f"[sf.muted]· expires[/] {lk.expires_at.isoformat()}"
         )
+        if all_bundles:
+            console.print(f"  [sf.muted]bundle:[/] {lk.bundle_root}")
         console.print(f"  [sf.muted]paths:[/] {paths_fmt}")
         if lk.intent:
             console.print(f"  [sf.muted]intent:[/] {lk.intent}")
@@ -751,7 +778,7 @@ def locks_list_cmd(
     help="Emit machine-readable JSON.",
 )
 def locks_prune_cmd(as_json: bool) -> None:
-    """Physically remove expired locks from ``active-edits.json``.
+    """Remove expired locks from the machine-wide registry.
 
     ``list`` and ``check`` already filter expired locks at read
     time, so calling ``prune`` is housekeeping (keeps the file
@@ -761,9 +788,7 @@ def locks_prune_cmd(as_json: bool) -> None:
     try:
         root = find_bundle_root()
     except BundleNotFoundError:
-        if as_json:
-            click.echo(json.dumps({"pruned": 0, "reason": "not_in_bundle"}))
-        sys.exit(0)
+        root = Path.cwd()
     store = ActiveEditsStore(root)
     removed = store.prune()
     if as_json:
