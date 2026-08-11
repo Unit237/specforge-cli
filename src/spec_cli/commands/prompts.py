@@ -97,6 +97,10 @@ from ..ui import console, dim, fatal, info, ok, pointer, reject, warn
 # ---------------------------------------------------------------------------
 
 _COMMIT_SHA_FROM_GIT = object()
+# Raw session capture is useful as local scrollback, but large transcripts are
+# expensive to review and can exceed Git hosting limits. The commit hook keeps
+# the local file while refusing to silently add an oversized snapshot to Git.
+MAX_AUTO_STAGED_PROMPTS_BYTES = 5 * 1024 * 1024
 
 
 def _git_stage_paths(repo_top: Path, paths: list[Path]) -> None:
@@ -115,6 +119,13 @@ def _git_stage_paths(repo_top: Path, paths: list[Path]) -> None:
             text=True,
             timeout=120,
         )
+
+
+def _capture_fits_auto_stage_limit(path: Path) -> bool:
+    try:
+        return path.stat().st_size <= MAX_AUTO_STAGED_PROMPTS_BYTES
+    except OSError:
+        return False
 
 
 def _spec_stage_paths(bundle_root: Path, paths: list[Path]) -> None:
@@ -1001,6 +1012,13 @@ def run_capture_for_pre_commit_hook(
         # mirror loop in run_git_hook_pre_commit, which calls
         # `spec add` for every newly-staged path; redundant
         # `_spec_stage_paths` here is unnecessary.
+        if not _capture_fits_auto_stage_limit(dest):
+            size_mib = dest.stat().st_size / (1024 * 1024)
+            warn(
+                f"Kept {rel_dest} local ({size_mib:.1f} MiB) but did not "
+                "auto-stage it. Curate or split the capture before sharing."
+            )
+            return
         _git_stage_paths(repo_top, [dest])
 
         pointer("wrote", str(dest.relative_to(bundle_root)))

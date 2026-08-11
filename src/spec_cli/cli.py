@@ -21,6 +21,7 @@ from .commands.login import login_cmd, logout_cmd
 from .commands.presence import presence_group
 from .commands.prompts import prompts_group
 from .commands.pull import pull_cmd
+from .commands.review import review_cmd
 from .commands.push import push_cmd
 from .commands.shell import shell_group
 from .commands.team import team_cmd
@@ -58,6 +59,7 @@ cli.add_command(add_cmd)
 cli.add_command(unstage_cmd)
 cli.add_command(push_cmd)
 cli.add_command(pull_cmd)
+cli.add_command(review_cmd)
 cli.add_command(compile_cmd)
 cli.add_command(codex_group)
 cli.add_command(prompts_group)
