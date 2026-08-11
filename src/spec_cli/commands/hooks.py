@@ -381,7 +381,8 @@ def _emit_conflict_warning(
       Cross-machine, cross-user; the original Spec Live warning.
     * ``active_conflicts`` — *your own other AI agents* on this
       machine that have the same file locked via
-      ``.spec/active-edits.json``. Same-user, cross-tool. Surfaced
+      ``~/.spec/active-edits.json``. Same-user, cross-tool, and shared
+      across every local Spec repo. Surfaced
       *first* because a same-machine overlap is the more certain
       conflict — a teammate could be stale, your Cursor agent
       writing right now is not.

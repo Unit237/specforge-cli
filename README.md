@@ -56,15 +56,19 @@ spec discover
 
 # Press Enter (or type `all`) for every uninitialized repo, or enter a
 # selection such as `1,3,5-7`. Existing Spec repos are shown but never changed.
+
+# Or initialize every new repo and push each one to Cloud in one pass.
+spec discover --all --push
 ```
 
-`spec discover --dry-run` is a read-only inventory, and `spec discover --all`
-is the non-interactive form. Discovery recognizes normal clones, worktrees,
+`spec discover --dry-run` is a read-only inventory, `spec discover --all`
+is the non-interactive form, and `--push` immediately runs the normal Cloud
+push for every repository initialized successfully. Discovery recognizes normal clones, worktrees,
 and submodules while skipping dependency, build, cache, and hidden directories.
 It runs the same safe `spec init` scaffold for every selected repository and
 registers each one with the machine-wide workday switch. Local initialization
-does not create Cloud resources; run `spec push` once in a new bundle when you
-want to bind it to Spec Cloud.
+does not create Cloud resources unless `--push` is present. You can also run
+`spec push --all` later from any directory to process every registered bundle.
 
 For a single new project:
 
@@ -153,10 +157,10 @@ the compiler sees on the next run — see
 | Command | Purpose |
 |---|---|
 | `spec init` | Scaffold `spec.yaml`, `docs/product.md`, `prompts/scaffold.md`, `prompts/sessions/`, and `AGENTS.md`. |
-| `spec discover [ROOT]` | Find Git repositories under a workspace, show their Spec status, and interactively initialize any or all uninitialized repos. Use `--dry-run` to inventory and `--all` for automation. |
+| `spec discover [ROOT]` | Find Git repositories under a workspace, show their Spec status, and interactively initialize any or all uninitialized repos. Use `--dry-run` to inventory, `--all` for automation, and `--push` to push each newly initialized repo. |
 | `spec status` | Git-like sections: staged for push, modified (out-of-date snapshot vs not staged), untracked, etc. |
 | `spec add <paths…>` | Stage files. Rejects non-spec extensions explicitly. |
-| `spec push [URL]` | Upload the staged snapshot to Cloud, in 10-file batches. Accepts a `git`-style URL (see below). |
+| `spec push [URL]` | Upload the staged snapshot to Cloud, in 10-file batches. `--all` processes every registered/local bundle and summarizes failures after continuing through the full set. Accepts a `git`-style URL (see below). |
 | `spec pull [URL]` | Pull the latest bundle state into the working tree. `--force` to overwrite local changes. Accepts the same URL form as `push`. |
 | `spec compile` | Assemble a compile prompt for Claude Code (default) or call an API directly (`--via api`). |
 | `spec log` | Print recent pushes and runs for this bundle. |
@@ -274,7 +278,7 @@ spec live on        # re-enable for this bundle (with --verbose for full assista
 | `spec locks pull-status` | Exit `0` when no teammate is ahead of your branch, `2` when at least one same-branch peer has a different `head_commit` — i.e. they pushed and you should `git pull`. `--json` for hooks. |
 | `spec locks acquire <path>` | Take a per-machine **active-edit** lock for a single AI agent. Use `--agent claude_code\|cursor\|codex\|compress\|...` plus `--session <id>` so the same agent renewing doesn't conflict with itself. `--block` exits `2` on cross-agent overlap. Locks have a TTL (default 5 min, cap 60 min) so a crashed agent never deadlocks. |
 | `spec locks release <lock_id>` | Drop a previously-acquired active-edit lock. Unknown ids exit `0` (no-op) — PostToolUse hooks fire unconditionally and must never break. |
-| `spec locks list` | Show every active edit lock in this bundle. Filterable by `--agent` / `--session`; `--include-expired` reveals stale rows. |
+| `spec locks list` | Show active edit locks in this bundle. Add `--all` for every repo in the machine-wide registry; filter with `--agent` / `--session`, and use `--include-expired` for stale rows. |
 | `spec locks prune` | Physically remove expired active-edit locks. Reads already filter them; this is housekeeping. |
 | `spec hooks install-claude` | Wire the Spec Live `PreToolUse` *and* `PostToolUse` hooks into Claude Code (`spec init` does this for you on first run). PreToolUse warns on teammate conflicts and auto-acquires an active-edit lock; PostToolUse releases it. Add `--block` to refuse edits on conflict instead of just warning. |
 | `spec live status` | Resolved broadcasting state — bundle setting, machine mute, and the final answer. |
@@ -308,10 +312,14 @@ vectors today:
 teammate dirty here?" — but a single dev commonly has Claude Code, Cursor, and
 Codex all editing the same working tree in parallel. Git can't tell those
 agents apart; `team-presence.json` lumps them under one `self` block. To
-coordinate inside one machine we maintain a second, smaller file:
+coordinate inside one machine we maintain one shared registry:
 
-`.spec/active-edits.json` — a list of short-lived **active-edit locks** keyed
-by `(agent, session_id, paths)`. Each lock has a TTL (default 5 minutes,
+`~/.spec/active-edits.json` (or `$SPEC_HOME/active-edits.json`) — a list of
+short-lived **active-edit locks** keyed by
+`(bundle_root, agent, session_id, paths)`. Every local Spec repo uses this same
+physical file, while `bundle_root` keeps identical relative paths in unrelated
+repos from conflicting. Existing per-repo `.spec/active-edits.json` files are
+imported once and left untouched. Each lock has a TTL (default 5 minutes,
 capped at 60). The flow:
 
 1. Before a write tool call, the agent's PreToolUse hook calls
@@ -331,6 +339,10 @@ integrations can do the same via their respective rule / config systems —
 the contract is just "call `spec locks acquire` before write, `release`
 after". A crashed agent never holds a lock past the TTL; `spec locks prune`
 is a manual cleanup if you ever need it.
+
+Verify the shared registry at any time—even outside a repo—with
+`spec locks list --all --json`. The `bundle_root` field on every row shows
+which repository owns the lock.
 
 **Post-push pull hint.** When you run `spec push`, the CLI fires one extra
 presence event after the upload succeeds with the new `head_commit` baked in.

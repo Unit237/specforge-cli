@@ -171,3 +171,60 @@ def test_discover_reports_when_every_repo_is_initialized(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "Every discovered Git repository already has Spec" in result.output
+
+
+def test_discover_all_pushes_each_newly_initialized_repository(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+    workspace = tmp_path / "workspace"
+    alpha = _git_repo(workspace / "alpha")
+    bravo = _git_repo(workspace / "bravo")
+    pushed = []
+
+    def fake_push(root, *, dry_run, no_review, reviewers):
+        pushed.append((root, dry_run, no_review, reviewers))
+        return 0
+
+    monkeypatch.setattr(
+        "spec_cli.commands.discover.run_push_for_bundle",
+        fake_push,
+    )
+    result = CliRunner().invoke(
+        cli,
+        ["discover", str(workspace), "--all", "--push"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [row[0] for row in pushed] == [alpha.resolve(), bravo.resolve()]
+    assert all(row[1:] == (False, False, ()) for row in pushed)
+    assert "Pushed all 2 newly initialized repositories" in result.output
+
+
+def test_discover_push_failure_does_not_skip_later_repository(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+    workspace = tmp_path / "workspace"
+    alpha = _git_repo(workspace / "alpha")
+    bravo = _git_repo(workspace / "bravo")
+    pushed = []
+
+    def fake_push(root, **kwargs):
+        pushed.append(root)
+        return 1 if root == alpha else 0
+
+    monkeypatch.setattr(
+        "spec_cli.commands.discover.run_push_for_bundle",
+        fake_push,
+    )
+    result = CliRunner().invoke(
+        cli,
+        ["discover", str(workspace), "--all", "--push"],
+    )
+
+    assert result.exit_code == 1
+    assert pushed == [alpha.resolve(), bravo.resolve()]
+    assert "Initialized but could not push" in result.output

@@ -20,43 +20,70 @@ Contracts under test:
 * ``spec locks check <path> --json`` includes the active-edit
   holders alongside team-presence holders.
 """
+
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 SPEC_BIN = [sys.executable, "-m", "spec_cli"]
+SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+
+
+@pytest.fixture(autouse=True)
+def isolate_spec_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+
+
+def _active_file() -> Path:
+    return Path(os.environ["SPEC_HOME"]) / "active-edits.json"
 
 
 def _make_bundle(tmp_path: Path) -> Path:
     bundle = tmp_path / "bundle"
-    bundle.mkdir()
+    bundle.mkdir(parents=True)
     (bundle / "spec.yaml").write_text("name: demo\n", encoding="utf-8")
     return bundle
 
 
 def _run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    prior_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(SOURCE_ROOT)
+        if not prior_pythonpath
+        else str(SOURCE_ROOT) + os.pathsep + prior_pythonpath
+    )
     return subprocess.run(
         SPEC_BIN + args,
         cwd=str(cwd),
+        env=env,
         capture_output=True,
         text=True,
     )
 
 
 def test_acquire_creates_lock_file(tmp_path: Path) -> None:
-    """A successful acquire creates ``.spec/active-edits.json`` and
+    """A successful acquire creates the machine-wide registry and
     prints a lock id the caller can use for release."""
     bundle = _make_bundle(tmp_path)
     res = _run(
         [
-            "locks", "acquire", "src/auth.py",
-            "--agent", "claude_code",
-            "--session", "abc",
-            "--intent", "Edit",
+            "locks",
+            "acquire",
+            "src/auth.py",
+            "--agent",
+            "claude_code",
+            "--session",
+            "abc",
+            "--intent",
+            "Edit",
             "--json",
         ],
         cwd=bundle,
@@ -69,10 +96,10 @@ def test_acquire_creates_lock_file(tmp_path: Path) -> None:
     assert payload["paths"] == ["src/auth.py"]
     assert payload["lock_id"]
     assert payload["conflicts"] == []
-    on_disk = json.loads(
-        (bundle / ".spec" / "active-edits.json").read_text(encoding="utf-8")
-    )
+    assert payload["bundle_root"] == str(bundle.resolve())
+    on_disk = json.loads(_active_file().read_text(encoding="utf-8"))
     assert len(on_disk["locks"]) == 1
+    assert not (bundle / ".spec" / "active-edits.json").exists()
 
 
 def test_acquire_block_mode_exits_two_on_conflict(tmp_path: Path) -> None:
@@ -81,15 +108,12 @@ def test_acquire_block_mode_exits_two_on_conflict(tmp_path: Path) -> None:
     refused tool call in Claude Code / Cursor's hook chain."""
     bundle = _make_bundle(tmp_path)
     r1 = _run(
-        ["locks", "acquire", "auth.py",
-         "--agent", "claude_code", "--session", "a", "--json"],
+        ["locks", "acquire", "auth.py", "--agent", "claude_code", "--session", "a", "--json"],
         cwd=bundle,
     )
     assert r1.returncode == 0
     r2 = _run(
-        ["locks", "acquire", "auth.py",
-         "--agent", "cursor", "--session", "b",
-         "--block", "--json"],
+        ["locks", "acquire", "auth.py", "--agent", "cursor", "--session", "b", "--block", "--json"],
         cwd=bundle,
     )
     assert r2.returncode == 2
@@ -106,14 +130,21 @@ def test_renewal_is_not_a_conflict(tmp_path: Path) -> None:
     caller is renewing its own lock, not stomping on someone else's."""
     bundle = _make_bundle(tmp_path)
     _run(
-        ["locks", "acquire", "auth.py",
-         "--agent", "claude_code", "--session", "a", "--json"],
+        ["locks", "acquire", "auth.py", "--agent", "claude_code", "--session", "a", "--json"],
         cwd=bundle,
     )
     res = _run(
-        ["locks", "acquire", "auth.py",
-         "--agent", "claude_code", "--session", "a",
-         "--block", "--json"],
+        [
+            "locks",
+            "acquire",
+            "auth.py",
+            "--agent",
+            "claude_code",
+            "--session",
+            "a",
+            "--block",
+            "--json",
+        ],
         cwd=bundle,
     )
     assert res.returncode == 0, res.stdout + res.stderr
@@ -125,8 +156,7 @@ def test_release_removes_lock(tmp_path: Path) -> None:
     bundle = _make_bundle(tmp_path)
     acquired = json.loads(
         _run(
-            ["locks", "acquire", "auth.py",
-             "--agent", "cursor", "--json"],
+            ["locks", "acquire", "auth.py", "--agent", "cursor", "--json"],
             cwd=bundle,
         ).stdout
     )
@@ -139,9 +169,7 @@ def test_release_removes_lock(tmp_path: Path) -> None:
     body = json.loads(res.stdout)
     assert body["released"] is True
 
-    listed = json.loads(
-        _run(["locks", "list", "--json"], cwd=bundle).stdout
-    )
+    listed = json.loads(_run(["locks", "list", "--json"], cwd=bundle).stdout)
     assert listed["locks"] == []
 
 
@@ -161,10 +189,11 @@ def test_release_unknown_id_is_noop(tmp_path: Path) -> None:
 
 def test_list_filters_by_agent(tmp_path: Path) -> None:
     bundle = _make_bundle(tmp_path)
-    _run(["locks", "acquire", "a.py", "--agent", "claude_code",
-          "--session", "1", "--json"], cwd=bundle)
-    _run(["locks", "acquire", "b.py", "--agent", "cursor",
-          "--session", "2", "--json"], cwd=bundle)
+    _run(
+        ["locks", "acquire", "a.py", "--agent", "claude_code", "--session", "1", "--json"],
+        cwd=bundle,
+    )
+    _run(["locks", "acquire", "b.py", "--agent", "cursor", "--session", "2", "--json"], cwd=bundle)
 
     res = _run(
         ["locks", "list", "--agent", "cursor", "--json"],
@@ -184,8 +213,7 @@ def test_check_surfaces_active_holders_in_json(tmp_path: Path) -> None:
     # Take a lock as "cursor"; then ask check about it.
     acquire = json.loads(
         _run(
-            ["locks", "acquire", "auth.py",
-             "--agent", "cursor", "--session", "s", "--json"],
+            ["locks", "acquire", "auth.py", "--agent", "cursor", "--session", "s", "--json"],
             cwd=bundle,
         ).stdout
     )
@@ -211,12 +239,11 @@ def test_prune_removes_expired(tmp_path: Path) -> None:
     bundle = _make_bundle(tmp_path)
     acquired = json.loads(
         _run(
-            ["locks", "acquire", "auth.py",
-             "--agent", "cursor", "--session", "s", "--json"],
+            ["locks", "acquire", "auth.py", "--agent", "cursor", "--session", "s", "--json"],
             cwd=bundle,
         ).stdout
     )
-    file = bundle / ".spec" / "active-edits.json"
+    file = _active_file()
     body = json.loads(file.read_text(encoding="utf-8"))
     body["locks"][0]["expires_at"] = "2020-01-01T00:00:00+00:00"
     file.write_text(json.dumps(body), encoding="utf-8")
@@ -228,3 +255,29 @@ def test_prune_removes_expired(tmp_path: Path) -> None:
     assert final["locks"] == []
     # Quiet the unused warning.
     assert acquired["lock_id"]
+
+
+def test_list_all_reads_every_bundle_from_outside_a_bundle(tmp_path: Path) -> None:
+    first = _make_bundle(tmp_path / "one")
+    second = _make_bundle(tmp_path / "two")
+    _run(
+        ["locks", "acquire", "same.py", "--agent", "codex", "--json"],
+        cwd=first,
+    )
+    second_result = _run(
+        ["locks", "acquire", "same.py", "--agent", "cursor", "--json"],
+        cwd=second,
+    )
+    assert json.loads(second_result.stdout)["conflicts"] == []
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    result = _run(["locks", "list", "--all", "--json"], cwd=outside)
+
+    assert result.returncode == 0, result.stderr
+    locks = json.loads(result.stdout)["locks"]
+    assert {row["bundle_root"] for row in locks} == {
+        str(first.resolve()),
+        str(second.resolve()),
+    }
+    assert {tuple(row["paths"]) for row in locks} == {("same.py",)}

@@ -13,6 +13,7 @@ from ..constants import MANIFEST_FILENAME
 from ..git import repo_toplevel
 from ..ui import dim, info, ok, warn
 from .init import init_cmd
+from .push import run_push_for_bundle
 
 
 _DISCOVERY_SKIP_DIR_NAMES: frozenset[str] = frozenset(
@@ -189,6 +190,12 @@ def _initialize_repository(ctx: click.Context, root: Path) -> bool:
     help="List repositories and their Spec status without changing files.",
 )
 @click.option(
+    "--push",
+    "push_after_init",
+    is_flag=True,
+    help="Push each successfully initialized repository to Spec Cloud.",
+)
+@click.option(
     "--max-depth",
     type=click.IntRange(1, 32),
     default=8,
@@ -201,13 +208,16 @@ def discover_cmd(
     root: Path,
     initialize_all: bool,
     dry_run: bool,
+    push_after_init: bool,
     max_depth: int,
 ) -> None:
     """Find Git repositories under ROOT and initialize selected ones.
 
     Already-initialized repositories are shown but never overwritten. At the
     selection prompt, enter ALL, a list such as 1,3,5, or ranges such as 1-4.
-    Press Enter to select every uninitialized repository.
+    Press Enter to select every uninitialized repository. Add `--push` to run
+    the normal Cloud push for each successful initialization; for a fully
+    unattended setup use `spec discover ROOT --all --push`.
     """
     search_root = root.expanduser().resolve()
     info(f"Scanning for Git repositories under {search_root} …")
@@ -267,11 +277,21 @@ def discover_cmd(
     selected = [pending[index] for index in indexes]
     succeeded: list[Path] = []
     failed: list[Path] = []
+    push_failed: list[Path] = []
     for position, repository in enumerate(selected, start=1):
         info("")
         info(f"[{position}/{len(selected)}] Initializing {repository.root}")
         if _initialize_repository(ctx, repository.root):
             succeeded.append(repository.root)
+            if push_after_init:
+                info(f"[{position}/{len(selected)}] Pushing {repository.root}")
+                if run_push_for_bundle(
+                    repository.root,
+                    dry_run=False,
+                    no_review=False,
+                    reviewers=(),
+                ):
+                    push_failed.append(repository.root)
         else:
             failed.append(repository.root)
 
@@ -283,9 +303,14 @@ def discover_cmd(
         )
     for path in failed:
         warn(f"Could not initialize {path}")
-    if failed:
+    for path in push_failed:
+        warn(f"Initialized but could not push {path}")
+    if failed or push_failed:
         raise SystemExit(1)
-    dim("Next: run `spec push` in each new bundle to connect it to Spec Cloud.")
+    if push_after_init:
+        ok(f"Pushed all {len(succeeded)} newly initialized repositories.")
+    else:
+        dim("Next: run `spec push --all` to connect every bundle to Spec Cloud.")
 
 
 __all__ = [
