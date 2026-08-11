@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 
 from spec_cli.commands.prompts import (
+    MAX_AUTO_STAGED_PROMPTS_BYTES,
+    _capture_fits_auto_stage_limit,
     _branch_prompts_path,
     _merge_into_branch_file,
 )
@@ -42,6 +44,15 @@ def _make_session(sid: str, *, text: str = "hello") -> Session:
         source="manual",
         turns=[Turn(role="user", text=text)],
     )
+
+
+def test_capture_auto_stage_limit_keeps_large_transcripts_local(tmp_path: Path) -> None:
+    capture = tmp_path / "branch.prompts"
+    capture.write_bytes(b"x" * MAX_AUTO_STAGED_PROMPTS_BYTES)
+    assert _capture_fits_auto_stage_limit(capture) is True
+
+    capture.write_bytes(b"x" * (MAX_AUTO_STAGED_PROMPTS_BYTES + 1))
+    assert _capture_fits_auto_stage_limit(capture) is False
 
 
 def test_branch_prompts_filename_slugger() -> None:

@@ -40,6 +40,9 @@ Before planning or editing:
    proceeding.
 4. Report material progress, paths changed, blockers, and the final outcome in
    normal assistant messages. Spec Live shares those updates automatically.
+5. When the user asks for cloud review of the current pull request, run
+   `spec review`. Do not assume a reviewer was requested merely because a PR
+   exists; the explicit `agent-review` label is the authorization trigger.
 
 Treat the coordination brief as advisory and the lock check as the mechanical
 conflict signal. The brief disappears when the last active round finishes, so

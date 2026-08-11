@@ -70,6 +70,19 @@ registers each one with the machine-wide workday switch. Local initialization
 does not create Cloud resources unless `--push` is present. You can also run
 `spec push --all` later from any directory to process every registered bundle.
 
+To request the workspace's cloud reviewer for the current branch's open PR:
+
+```bash
+spec review
+```
+
+That command adds the explicit `agent-review` label. GitHub delivers the event,
+Actionairy selects the authorized reviewer profile and memory scope, and
+Compress runs a read-only review tied to the current head SHA. The durable
+GitHub review includes a 1.0–10.0 score; only 9.0+ with no blocking finding
+passes. A later push triggers a fresh review for the new SHA while the label
+remains present.
+
 For a single new project:
 
 ```bash
@@ -93,10 +106,10 @@ spec compile
 
 ## Git hooks
 
-`spec init` inside a git repo installs **pre-commit** (mirrors `git add` into
-`spec add` / `spec unstage` for bundle paths, including **renames**),
-**commit-msg** (`spec git-hooks commit-msg` — runs capture and stages `.prompts`
-into the **same** commit), **pre-push** (`spec push` when you `git push` a
+`spec init` inside a git repo installs **pre-commit** (captures sessions and
+mirrors `git add` into `spec add` / `spec unstage` for bundle paths, including
+**renames**), a compatibility-only **commit-msg** hook, **pre-push**
+(`spec push` when you `git push` a
 branch), and **post-merge** (prompt rollup on trunk plus a fast **local-only**
 bundle alignment check — stderr hints only when something is off, no Cloud
 round-trip). Refresh with `spec git-hooks install`. Remove Spec hook blocks from
@@ -162,6 +175,7 @@ the compiler sees on the next run — see
 | `spec add <paths…>` | Stage files. Rejects non-spec extensions explicitly. |
 | `spec push [URL]` | Upload the staged snapshot to Cloud, in 10-file batches. `--all` processes every registered/local bundle and summarizes failures after continuing through the full set. Accepts a `git`-style URL (see below). |
 | `spec pull [URL]` | Pull the latest bundle state into the working tree. `--force` to overwrite local changes. Accepts the same URL form as `push`. |
+| `spec review [--pr NUMBER]` | Add the explicit `agent-review` trigger to the current branch's open GitHub PR. |
 | `spec compile` | Assemble a compile prompt for Claude Code (default) or call an API directly (`--via api`). |
 | `spec log` | Print recent pushes and runs for this bundle. |
 
@@ -170,7 +184,7 @@ the compiler sees on the next run — see
 | Command | Purpose |
 |---|---|
 | `spec prompts capture --source claude_code\|cursor\|codex\|compress\|all` | Append new local agent sessions to `prompts/<branch>.prompts`. Deterministic; re-running skips sessions already captured at the same turn count. |
-| `spec prompts validate` | Check every `.prompt` file against the schema. Exit 1 on error. |
+| `spec prompts validate` | Check every `.prompts` file against the schema. Exit 1 on error. |
 | `spec prompts simulate` | (Contract-only in v0.1) Replay a session through the compiler in a read-only sandbox. |
 
 ### Codex capture
@@ -532,6 +546,9 @@ pytest
   is still the source of truth — this is a fast-fail.
 - **Prompt capture is read-only.** The Claude Code and Codex adapters read
   local JSONL / SQLite stores and never write there. Capture is safe to re-run.
+- **Oversized captures stay local.** The pre-commit hook does not silently
+  stage a branch `.prompts` snapshot larger than 5 MiB; curate or split it
+  before sharing so raw session volume does not inflate Git history.
 - **Tool-call args are summaries, not payloads.** We never capture file
   contents, shell output, or diffs. The format only stores what an auditor
   needs to reason about why the model did what it did.
