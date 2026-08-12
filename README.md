@@ -62,6 +62,8 @@ remembered, rootless runs rescan every remembered workspace, and older installs
 derive the workspace from their registered bundle paths. On a true first run it
 scans your home folder. Existing Spec repos are registered as well as newly
 initialized repos, fixing the old "selected but unbound" hole.
+Disposable Codex task checkouts under `.codex-worktrees/` are excluded from the
+registry so they cannot start duplicate watchers for the same repository.
 
 `spec on` creates or resolves the Cloud bundle identity needed by each watcher,
 then starts all registered watchers idempotently. It does **not** upload bundle
