@@ -37,6 +37,7 @@ log = logging.getLogger(__name__)
 CURSOR_FILENAME = "live-cursor.json"
 CURSOR_DIRNAME = ".spec"
 SCHEMA_VERSION = 1
+PRODUCER_BASELINE_VERSION = 1
 
 
 @dataclass
@@ -57,6 +58,10 @@ class LiveCursor:
     # inflation and stops duplicate user rows when ``broadcast_turns``
     # overshoots the local transcript length.
     posted_turn_keys: dict[str, set[str]] = field(default_factory=dict)
+    # Versioned one-time baseline for the producer.  A live watcher tails new
+    # turns; it must not upload every transcript already on the machine the
+    # first time it starts (or retry a legacy rejected backlog forever).
+    producer_baseline_version: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     # ── factories ─────────────────────────────────────────────────
@@ -122,6 +127,9 @@ class LiveCursor:
                 for sid, keys in posted.items()
                 if isinstance(keys, list)
             }
+        baseline = raw.get("producer_baseline_version")
+        if isinstance(baseline, int) and baseline >= 0:
+            cursor.producer_baseline_version = baseline
         return cursor
 
     @staticmethod
@@ -174,6 +182,10 @@ class LiveCursor:
         """How many turns of ``session_id`` have we already POSTed?"""
         with self._lock:
             return self.broadcast_turns.get(session_id, 0)
+
+    def has_session(self, session_id: str) -> bool:
+        with self._lock:
+            return session_id in self.broadcast_turns
 
     def is_turn_posted(self, session_id: str, turn_idx: int, turn: Any) -> bool:
         key = self.turn_post_key_for(turn_idx, turn)
@@ -250,6 +262,10 @@ class LiveCursor:
             ):
                 self.last_received_id = event_id
 
+    def mark_producer_baseline(self) -> None:
+        with self._lock:
+            self.producer_baseline_version = PRODUCER_BASELINE_VERSION
+
     # ── persistence ───────────────────────────────────────────────
 
     def save(self) -> None:
@@ -277,6 +293,7 @@ class LiveCursor:
                     sid: sorted(keys)
                     for sid, keys in self.posted_turn_keys.items()
                 },
+                "producer_baseline_version": self.producer_baseline_version,
             }
         tmp_fd, tmp_name = tempfile.mkstemp(
             prefix=f"{CURSOR_FILENAME}.",

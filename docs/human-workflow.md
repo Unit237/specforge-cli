@@ -20,10 +20,18 @@ registered even when no initialization is needed.
 Disposable `.codex-worktrees/` task branches are excluded; the stable checkout
 remains the machine-wide watcher target.
 
+New initialization is Git-rooted: `spec init` resolves
+`git rev-parse --show-toplevel`, uses that root when invoked below it, and
+refuses to write outside a Git worktree. Existing nested bundles remain
+readable, but are not created accidentally.
+
 `spec on` may write the server-minted immutable `cloud.bundle_id` and canonical
 `owner/slug` to `spec.yaml`, then refreshes managed Codex/Claude/Cursor rules and
 starts watchers. It sends no bundle file content. `spec publish` is the separate
 content transfer; `spec push` remains a compatibility alias.
+The first watcher start records existing local transcripts as a baseline and
+streams only later turns, preventing a historical replay storm. Historical
+capture remains an explicit `spec prompts capture` action.
 
 `spec activity` is the existing workspace-wide team stream under a shorter
 name. It includes local Codex, Claude Code, Cursor, and Compress sessions. Tool

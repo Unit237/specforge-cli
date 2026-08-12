@@ -824,15 +824,26 @@ def init_cmd(
         dim(f"bundle root: {bundle_root}")
         return
 
-    root = Path.cwd().resolve()
-
-    manifest_path = root / MANIFEST_FILENAME
-    if manifest_path.exists() and not force:
-        fatal(f"{MANIFEST_FILENAME} already exists. Re-run with --force to overwrite.")
+    cwd = Path.cwd().resolve()
 
     # Local imports keep the cold-start path light when init isn't the
     # invoked command (Click still imports the module on every run).
     from ..git import read_git_context, read_origin_url, repo_toplevel
+
+    git_root = repo_toplevel(cwd)
+    if git_root is None:
+        fatal(
+            "Spec can only initialize a Git repository. Run `git init` "
+            "first, then run `spec init` again."
+        )
+        return
+    root = git_root.resolve()
+    if cwd != root:
+        dim(f"Using Git repository root: {root}")
+
+    manifest_path = root / MANIFEST_FILENAME
+    if manifest_path.exists() and not force:
+        fatal(f"{MANIFEST_FILENAME} already exists. Re-run with --force to overwrite.")
 
     git_ctx = read_git_context(root)
 

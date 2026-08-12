@@ -104,3 +104,25 @@ def test_parent_workspace_session_is_allowed_for_only_registered_child(
     )
 
     assert list(watcher_mod._scoped_sessions([session], [signal])) == [session]
+
+
+def test_live_baseline_skips_existing_transcript_history(monkeypatch, tmp_path):
+    session = Session(
+        id="old-session",
+        source="codex",
+        turns=[
+            Turn(role="user", text="old prompt"),
+            Turn(role="assistant", text="old answer"),
+        ],
+    )
+    cursor = watcher_mod.LiveCursor.load(tmp_path, project_id=7)
+    monkeypatch.setattr(
+        watcher_mod, "_iter_local_sessions", lambda _paths: iter([session])
+    )
+
+    count = watcher_mod._establish_live_baseline(cursor, tmp_path)
+
+    assert count == 1
+    assert cursor.turns_broadcast_for(session.id) == 2
+    assert cursor.producer_baseline_version == 1
+    assert watcher_mod._establish_live_baseline(cursor, tmp_path) == 0
