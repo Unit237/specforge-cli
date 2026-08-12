@@ -1280,7 +1280,11 @@ def team_watch_cmd(
             return
         use_qa_coalesce = tick_clock
         event_buffer.append(ev)
-        event_to_project[ev.id] = ev.project_id
+        # Workspace-only events intentionally have no project and decode as
+        # project_id=0 in the dependency-free CLI wire model. They can be
+        # reviewed in the activity pane but cannot use project-scoped /flag.
+        if ev.project_id > 0:
+            event_to_project[ev.id] = ev.project_id
         if not include_presence and ev.role == "presence":
             return
         # Update the user → AI pairing tracker *before* any visibility

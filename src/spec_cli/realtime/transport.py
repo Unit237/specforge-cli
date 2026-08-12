@@ -98,13 +98,19 @@ class HTTPPoster:
         self,
         api_base: str,
         access_token: str,
-        project_id: int,
+        project_id: int | None,
         *,
+        workspace: bool = False,
         user_agent: str = "spec-cli/live",
     ) -> None:
-        self._url = (
-            f"{api_base.rstrip('/')}/api/projects/{project_id}/prompt-events"
-        )
+        if workspace:
+            self._url = f"{api_base.rstrip('/')}/api/me/prompt-events"
+        else:
+            if project_id is None:
+                raise ValueError("project_id is required unless workspace=True")
+            self._url = (
+                f"{api_base.rstrip('/')}/api/projects/{project_id}/prompt-events"
+            )
         self._session = requests.Session()
         self._session.headers.update(
             {

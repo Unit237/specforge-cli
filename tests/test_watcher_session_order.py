@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 
 from spec_cli.prompts.schema import Session, Turn
 from spec_cli.realtime import watcher as watcher_mod
@@ -104,6 +105,114 @@ def test_parent_workspace_session_is_allowed_for_only_registered_child(
     )
 
     assert list(watcher_mod._scoped_sessions([session], [signal])) == [session]
+
+
+def test_ambiguous_parent_session_is_workspace_routed_once(
+    monkeypatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    actionairy = workspace / "actionairy"
+    signal = workspace / "signal"
+    actionairy.mkdir(parents=True)
+    signal.mkdir()
+    prefs = Preferences(bundles=[str(signal), str(actionairy)])
+    monkeypatch.setattr(watcher_mod, "load_preferences", lambda: prefs)
+    session = Session(
+        id="workspace-only",
+        source="codex",
+        cwd=str(workspace),
+        turns=[Turn(role="user", text="plan work across products")],
+    )
+
+    assert watcher_mod._session_route(session, [actionairy]) == "workspace"
+    assert watcher_mod._session_route(session, [signal]) == "skip"
+    assert list(watcher_mod._scoped_sessions([session], [actionairy])) == [session]
+    assert list(watcher_mod._scoped_sessions([session], [signal])) == []
+
+
+def test_parent_session_touching_multiple_repos_is_workspace_routed_once(
+    monkeypatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    actionairy = workspace / "actionairy"
+    signal = workspace / "signal"
+    actionairy.mkdir(parents=True)
+    signal.mkdir()
+    prefs = Preferences(bundles=[str(signal), str(actionairy)])
+    monkeypatch.setattr(watcher_mod, "load_preferences", lambda: prefs)
+    session = Session(
+        id="cross-repo",
+        source="codex",
+        cwd=str(workspace),
+        paths_touched=["actionairy/app.py", "signal/index.ts"],
+        turns=[Turn(role="user", text="coordinate both products")],
+    )
+
+    assert watcher_mod._session_route(session, [actionairy]) == "workspace"
+    assert watcher_mod._session_route(session, [signal]) == "skip"
+
+
+def test_workspace_session_posts_only_to_workspace_endpoint(
+    monkeypatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    actionairy = workspace / "actionairy"
+    signal = workspace / "signal"
+    actionairy.mkdir(parents=True)
+    signal.mkdir()
+    prefs = Preferences(bundles=[str(signal), str(actionairy)])
+    monkeypatch.setattr(watcher_mod, "load_preferences", lambda: prefs)
+    session = Session(
+        id="workspace-post",
+        source="codex",
+        cwd=str(workspace),
+        turns=[Turn(role="user", text="plan without selecting a repo")],
+    )
+    monkeypatch.setattr(
+        watcher_mod, "_iter_local_sessions", lambda _paths: iter([session])
+    )
+    monkeypatch.setattr(
+        watcher_mod, "historical_bundle_paths", lambda _root: [actionairy]
+    )
+
+    class _Git:
+        branch = "main"
+        commit_sha = "abc123"
+
+    class _Poster:
+        def __init__(self) -> None:
+            self.events = []
+
+        def send(self, event, *, timeout=None):  # type: ignore[no-untyped-def]
+            self.events.append(event)
+            return True, len(self.events)
+
+    monkeypatch.setattr(watcher_mod, "read_git_context", lambda _root: _Git())
+    project_poster = _Poster()
+    workspace_poster = _Poster()
+    cursor = watcher_mod.LiveCursor.load(actionairy, project_id=7)
+    opts = watcher_mod.WatcherOptions(
+        project_id=7,
+        project_label="alice/actionairy",
+        api_base="https://example.test",
+        access_token="token",
+        self_user_id=None,
+    )
+
+    posted = watcher_mod._producer_tick(
+        bundle_root=actionairy,
+        cursor=cursor,
+        poster=project_poster,
+        workspace_poster=workspace_poster,
+        opts=opts,
+        stop_event=threading.Event(),
+    )
+
+    assert posted == 1
+    assert project_poster.events == []
+    assert len(workspace_poster.events) == 1
+    assert workspace_poster.events[0].branch is None
+    assert workspace_poster.events[0].commit_sha is None
 
 
 def test_live_baseline_skips_existing_transcript_history(monkeypatch, tmp_path):
