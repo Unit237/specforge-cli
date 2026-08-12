@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from os.path import commonpath
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import click
 from ..config import discover_bundle_roots_under_git_root
 from ..constants import MANIFEST_FILENAME
 from ..git import repo_toplevel
+from ..preferences import load_preferences, remember_bundle, remember_discovery_root
 from ..ui import dim, info, ok, warn
 from .init import init_cmd
 from .push import run_push_for_bundle
@@ -113,6 +115,35 @@ def inspect_git_repositories(roots: list[Path]) -> list[DiscoveredRepository]:
     return repositories
 
 
+def machine_discovery_roots(explicit_root: Path | None = None) -> list[Path]:
+    """Return stable workspace roots for machine-wide discovery."""
+    if explicit_root is not None:
+        return [explicit_root.expanduser().resolve()]
+    prefs = load_preferences()
+    saved = [
+        Path(value).expanduser().resolve()
+        for value in prefs.discovery_roots
+        if isinstance(value, str) and Path(value).expanduser().is_dir()
+    ]
+    if saved:
+        return sorted(set(saved), key=lambda path: str(path).casefold())
+
+    bundles = [
+        Path(value).expanduser().resolve()
+        for value in prefs.bundles
+        if isinstance(value, str) and Path(value).expanduser().exists()
+    ]
+    if bundles:
+        candidate = Path(commonpath([str(path) for path in bundles])).resolve()
+        if candidate.is_file():
+            candidate = candidate.parent
+        home = Path.home().resolve()
+        if candidate == Path(candidate.anchor) or home not in (candidate, *candidate.parents):
+            candidate = home
+        return [candidate]
+    return [Path.home().resolve()]
+
+
 def parse_repository_selection(raw: str, count: int) -> list[int]:
     """Parse ``all`` or a comma/space-separated set of numbers and ranges."""
     value = raw.strip().lower()
@@ -175,7 +206,6 @@ def _initialize_repository(ctx: click.Context, root: Path) -> bool:
 @click.argument(
     "root",
     required=False,
-    default=".",
     type=click.Path(path_type=Path, exists=True, file_okay=False, resolve_path=True),
 )
 @click.option(
@@ -193,6 +223,7 @@ def _initialize_repository(ctx: click.Context, root: Path) -> bool:
     "--push",
     "push_after_init",
     is_flag=True,
+    hidden=True,
     help="Push each successfully initialized repository to Spec Cloud.",
 )
 @click.option(
@@ -205,35 +236,58 @@ def _initialize_repository(ctx: click.Context, root: Path) -> bool:
 @click.pass_context
 def discover_cmd(
     ctx: click.Context,
-    root: Path,
+    root: Path | None,
     initialize_all: bool,
     dry_run: bool,
     push_after_init: bool,
     max_depth: int,
 ) -> None:
-    """Find Git repositories under ROOT and initialize selected ones.
+    """Find Git repositories across this machine and initialize selected ones.
 
-    Already-initialized repositories are shown but never overwritten. At the
-    selection prompt, enter ALL, a list such as 1,3,5, or ranges such as 1-4.
-    Press Enter to select every uninitialized repository. Add `--push` to run
-    the normal Cloud push for each successful initialization; for a fully
-    unattended setup use `spec discover ROOT --all --push`.
+    With no ROOT, scans every saved workspace regardless of the current
+    directory. The first run scans your home folder; passing ROOT remembers it
+    for future rootless runs. Already-initialized repositories are registered
+    but never overwritten. At the selection prompt, enter ALL, a list such as
+    1,3,5, or ranges such as 1-4. Press Enter to select every uninitialized
+    repository. Then run `spec on` once to connect and watch everything.
     """
-    search_root = root.expanduser().resolve()
-    info(f"Scanning for Git repositories under {search_root} …")
-    roots = discover_git_repositories(search_root, max_depth=max_depth)
+    search_roots = machine_discovery_roots(root)
+    if root is not None and not dry_run:
+        remember_discovery_root(root)
+    if len(search_roots) == 1:
+        info(f"Scanning this machine under {search_roots[0]} …")
+    else:
+        info(f"Scanning {len(search_roots)} saved workspaces on this machine …")
+        for search_root in search_roots:
+            dim(f"  {search_root}")
+    roots = sorted(
+        {
+            repository
+            for search_root in search_roots
+            for repository in discover_git_repositories(search_root, max_depth=max_depth)
+        },
+        key=lambda path: (len(path.parts), str(path).casefold()),
+    )
     if not roots:
         ok("No Git repositories found.")
         return
 
     repositories = inspect_git_repositories(roots)
     pending = [repository for repository in repositories if not repository.initialized]
+    if not dry_run:
+        for repository in repositories:
+            for bundle_root in repository.bundle_roots:
+                remember_bundle(bundle_root)
 
     info("")
     info("Git repositories")
     selectable = 0
     for repository in repositories:
-        label = _display_path(repository.root, search_root)
+        label = (
+            _display_path(repository.root, search_roots[0])
+            if len(search_roots) == 1
+            else str(repository.root)
+        )
         if repository.initialized:
             count = len(repository.bundle_roots)
             detail = "Spec initialized" if count == 1 else f"Spec initialized ({count} bundles)"
@@ -249,7 +303,7 @@ def discover_cmd(
         f"{len(repositories) - len(pending)} initialized · {len(pending)} available"
     )
     if not pending:
-        ok("Every discovered Git repository already has Spec.")
+        ok("Every discovered Git repository already has Spec and is registered.")
         return
     if dry_run:
         dim("Dry run — no repositories were changed.")
@@ -310,7 +364,7 @@ def discover_cmd(
     if push_after_init:
         ok(f"Pushed all {len(succeeded)} newly initialized repositories.")
     else:
-        dim("Next: run `spec push --all` to connect every bundle to Spec Cloud.")
+        dim("Next: run `spec on` to connect and watch every registered project.")
 
 
 __all__ = [
@@ -318,5 +372,6 @@ __all__ = [
     "discover_cmd",
     "discover_git_repositories",
     "inspect_git_repositories",
+    "machine_discovery_roots",
     "parse_repository_selection",
 ]

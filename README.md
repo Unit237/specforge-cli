@@ -47,33 +47,33 @@ Recommended: install [Claude Code](https://claude.ai/code) too. The CLI's
 
 ## Quick start
 
-Already have a folder full of Git repositories? Initialize any or all of them
-from one terminal screen:
+The daily model is intentionally small:
 
 ```bash
-cd ~/code
-spec discover
-
-# Press Enter (or type `all`) for every uninitialized repo, or enter a
-# selection such as `1,3,5-7`. Existing Spec repos are shown but never changed.
-
-# Or initialize every new repo and push each one to Cloud in one pass.
-spec discover --all --push
+spec discover       # once: find/register repos across saved workspaces
+spec on             # from anywhere: connect + start every watcher
+spec activity       # all teammates and agents; add --show-tool-runs for tools
+spec prs            # all of your open PRs under Spec watch
+spec review         # choose your Compress cloud agent or a Spec teammate
 ```
 
-`spec discover --dry-run` is a read-only inventory, `spec discover --all`
-is the non-interactive form, and `--push` immediately runs the normal Cloud
-push for every repository initialized successfully. Discovery recognizes normal clones, worktrees,
-and submodules while skipping dependency, build, cache, and hidden directories.
-It runs the same safe `spec init` scaffold for every selected repository and
-registers each one with the machine-wide workday switch. Local initialization
-does not create Cloud resources unless `--push` is present. You can also run
-`spec push --all` later from any directory to process every registered bundle.
+`spec discover` is system-wide, not cwd-relative: an explicit workspace root is
+remembered, rootless runs rescan every remembered workspace, and older installs
+derive the workspace from their registered bundle paths. On a true first run it
+scans your home folder. Existing Spec repos are registered as well as newly
+initialized repos, fixing the old "selected but unbound" hole.
 
-To request the workspace's cloud reviewer for the current branch's open PR:
+`spec on` creates or resolves the Cloud bundle identity needed by each watcher,
+then starts all registered watchers idempotently. It does **not** upload bundle
+files. Content transfer is the separate, explicit `spec publish` command;
+`spec push` remains a compatibility alias for hooks and older scripts.
+
+To request review for the current PR (or choose from all open watched PRs):
 
 ```bash
-spec review
+spec review --with cloud          # your Actionairy-authorized Compress agent
+spec review --with @alice         # native GitHub request to a Spec teammate
+spec review --pr owner/repo#123   # explicit PR from any watched project
 ```
 
 That command adds the explicit `agent-review` label. GitHub delivers the event,
@@ -170,12 +170,15 @@ the compiler sees on the next run — see
 | Command | Purpose |
 |---|---|
 | `spec init` | Scaffold `spec.yaml`, `docs/product.md`, `prompts/scaffold.md`, `prompts/sessions/`, and `AGENTS.md`. |
-| `spec discover [ROOT]` | Find Git repositories under a workspace, show their Spec status, and interactively initialize any or all uninitialized repos. Use `--dry-run` to inventory, `--all` for automation, and `--push` to push each newly initialized repo. |
+| `spec discover [ROOT]` | System-wide repository inventory. ROOT is remembered; no ROOT scans all saved workspaces. Registers existing bundles and optionally initializes new ones. |
+| `spec on` / `spec off` | Connect and start every registered watcher, or stop them all. Connecting uploads no repository content. |
+| `spec activity [--show-tool-runs]` | Workspace-wide live feed for Codex, Claude Code, Cursor, and Compress. Tool calls stay collapsed unless requested. |
+| `spec prs [--all-authors]` | Open GitHub PRs across repositories registered with Spec watch. Defaults to your PRs. |
+| `spec review [--pr OWNER/REPO#N] [--with cloud|@TEAMMATE]` | Request a SHA-bound Compress cloud review or a native GitHub teammate review. |
 | `spec status` | Git-like sections: staged for push, modified (out-of-date snapshot vs not staged), untracked, etc. |
 | `spec add <paths…>` | Stage files. Rejects non-spec extensions explicitly. |
-| `spec push [URL]` | Upload the staged snapshot to Cloud, in 10-file batches. `--all` processes every registered/local bundle and summarizes failures after continuing through the full set. Accepts a `git`-style URL (see below). |
+| `spec publish [URL]` | Explicitly upload the staged snapshot to Cloud. `--all` handles every registered bundle. `spec push` is a backwards-compatible alias. |
 | `spec pull [URL]` | Pull the latest bundle state into the working tree. `--force` to overwrite local changes. Accepts the same URL form as `push`. |
-| `spec review [--pr NUMBER]` | Add the explicit `agent-review` trigger to the current branch's open GitHub PR. |
 | `spec compile` | Assemble a compile prompt for Claude Code (default) or call an API directly (`--via api`). |
 | `spec log` | Print recent pushes and runs for this bundle. |
 
@@ -224,9 +227,11 @@ Use the machine-wide workday switch instead of managing bundle daemons one by
 one:
 
 ```bash
-spec on       # start of day: enable sharing + autostart; start known bundles
-spec status   # global watcher state, then current bundle staging state
-spec off      # end of day: cleanly stop all watchers and release local locks
+spec on                             # connect + start every registered project
+spec status                         # plain Watching / Stopped / Needs connection states
+spec activity                       # every teammate and agent across the workspace
+spec activity --show-tool-runs      # expand longer tool calls and code blocks
+spec off                            # stop all watchers and release local locks
 ```
 
 `spec on` learns the current bundle, remembers every bundle seen through
@@ -235,12 +240,11 @@ those known bundle watchers idempotently. `spec off` mutes this machine before
 stopping them, so a shell hook cannot race the shutdown. It controls local
 coordination only; cloud-side PR jobs are configured and run separately.
 
-Only Cloud-bound bundles (a manifest with both `cloud.project` and the
-server-minted `cloud.bundle_id`) get a watcher. Local examples and fresh
-scaffolds are listed as **unbound** and skipped until their first successful
-`spec push`. `spec on` also preflights the shared CLI session once, so an
-expired login produces one actionable `spec login` message instead of several
-short-lived daemons.
+Fresh bundles no longer need a content push before they can be watched.
+`spec on` resolves or creates the Cloud identity and stamps the immutable
+`cloud.bundle_id`, without uploading staged files. If connection fails,
+`spec status` says **Needs connection** and prints the actionable error; it no
+longer communicates state through filled and hollow circles.
 
 It also materializes active agent rounds into
 `.spec/team-coordination.json` and `.spec/team-coordination.md`. The brief

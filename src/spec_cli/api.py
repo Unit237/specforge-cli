@@ -155,6 +155,13 @@ class CloudClient:
         raw = self._request("POST", "/api/projects", json=body)
         return self._as_project_out(raw)
 
+    # -- teams ---------------------------------------------------------
+
+    def list_team_members(self, team_id: int) -> list[dict[str, Any]]:
+        """Return members of one team the signed-in user can access."""
+        data = self._request("GET", f"/api/teams/{team_id}/members")
+        return data or []
+
     # -- files ---------------------------------------------------------
 
     def list_files(

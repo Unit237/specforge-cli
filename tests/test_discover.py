@@ -143,7 +143,13 @@ def test_discover_all_initializes_every_available_repo_and_skips_existing(
     assert existing_manifest.read_text(encoding="utf-8").startswith('schema: "spec/v0.1"')
     assert "existing · Spec initialized" in result.output
     assert "Initialized 2 repositories" in result.output
-    assert load_preferences().bundles == [str(alpha.resolve()), str(bravo.resolve())]
+    prefs = load_preferences()
+    assert set(prefs.bundles) == {
+        str(alpha.resolve()),
+        str(bravo.resolve()),
+        str(existing.resolve()),
+    }
+    assert prefs.discovery_roots == [str(workspace.resolve())]
 
 
 def test_discover_reprompts_after_invalid_selection(tmp_path, monkeypatch):
@@ -170,7 +176,28 @@ def test_discover_reports_when_every_repo_is_initialized(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ["discover", str(workspace)])
 
     assert result.exit_code == 0, result.output
-    assert "Every discovered Git repository already has Spec" in result.output
+    assert "Every discovered Git repository already has Spec and is registered" in result.output
+    assert load_preferences().bundles == [str(repo.resolve())]
+
+
+def test_rootless_discover_uses_saved_workspace_outside_current_directory(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+    workspace = tmp_path / "workspace"
+    repo = _git_repo(workspace / "api")
+
+    first = CliRunner().invoke(cli, ["discover", str(workspace), "--all"])
+    assert first.exit_code == 0, first.output
+    monkeypatch.chdir(tmp_path)
+
+    second = CliRunner().invoke(cli, ["discover", "--dry-run"])
+
+    assert second.exit_code == 0, second.output
+    assert "Scanning this machine under" in second.output
+    assert "api · Spec initialized" in second.output
+    assert (repo / "spec.yaml").is_file()
 
 
 def test_discover_all_pushes_each_newly_initialized_repository(

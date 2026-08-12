@@ -11,7 +11,8 @@ Shape (small, forward-compat — unknown keys are preserved verbatim):
       "schema": 1,
       "prompt_stream": "default" | "muted",
       "autostart":     "default" | "off",
-      "bundles":       ["/absolute/path/to/a/spec/bundle"]
+      "bundles":       ["/absolute/path/to/a/spec/bundle"],
+      "discovery_roots": ["/absolute/path/to/a/workspace"]
     }
 
 Why JSON, not YAML: the credentials file already uses JSON, so users
@@ -36,6 +37,11 @@ The current keys:
 * ``bundles`` — absolute roots of Spec bundles seen on this machine. This is
   the small local registry used by the machine-wide ``spec on`` / ``spec off``
   workday switch. Missing paths are ignored and pruned on the next switch.
+
+* ``discovery_roots`` — workspace roots scanned by a rootless
+  ``spec discover`` and by ``spec on``. This is what makes discovery a
+  machine-wide inventory instead of a command whose meaning changes with the
+  current directory.
 
 Atomic writes (write-temp + rename) and tolerant reads (missing or
 malformed file = defaults). Same hygiene as ``LiveCursor`` so a kill
@@ -80,11 +86,14 @@ class Preferences:
     prompt_stream: str = "default"  # "default" | "muted"
     autostart: str = "default"  # "default" | "off"
     bundles: list[str] = None  # type: ignore[assignment]
+    discovery_roots: list[str] = None  # type: ignore[assignment]
     raw: dict = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.bundles is None:
             self.bundles = []
+        if self.discovery_roots is None:
+            self.discovery_roots = []
         if self.raw is None:
             self.raw = {}
 
@@ -142,7 +151,19 @@ class Preferences:
             for value in bundles_raw:
                 if isinstance(value, str) and value and value not in bundles:
                     bundles.append(value)
-        return cls(prompt_stream=ps, autostart=au, bundles=bundles, raw=data)
+        discovery_roots_raw = data.get("discovery_roots")
+        discovery_roots: list[str] = []
+        if isinstance(discovery_roots_raw, list):
+            for value in discovery_roots_raw:
+                if isinstance(value, str) and value and value not in discovery_roots:
+                    discovery_roots.append(value)
+        return cls(
+            prompt_stream=ps,
+            autostart=au,
+            bundles=bundles,
+            discovery_roots=discovery_roots,
+            raw=data,
+        )
 
     # ── writes ────────────────────────────────────────────────
 
@@ -163,6 +184,7 @@ class Preferences:
         merged["prompt_stream"] = self.prompt_stream
         merged["autostart"] = self.autostart
         merged["bundles"] = list(dict.fromkeys(self.bundles))
+        merged["discovery_roots"] = list(dict.fromkeys(self.discovery_roots))
 
         try:
             tmp_fd, tmp_name = tempfile.mkstemp(
@@ -217,10 +239,21 @@ def remember_bundle(bundle_root: Path) -> Preferences:
     return prefs
 
 
+def remember_discovery_root(search_root: Path) -> Preferences:
+    """Remember one workspace as part of the machine-wide discovery scope."""
+    root = str(search_root.expanduser().resolve())
+    prefs = load_preferences()
+    if root not in prefs.discovery_roots:
+        prefs.discovery_roots.append(root)
+        prefs.save()
+    return prefs
+
+
 __all__ = [
     "PREFERENCES_FILENAME",
     "PREFERENCES_SCHEMA_VERSION",
     "Preferences",
     "load_preferences",
     "remember_bundle",
+    "remember_discovery_root",
 ]

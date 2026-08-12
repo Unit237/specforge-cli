@@ -1,4 +1,4 @@
-"""`spec push` — upload the staged snapshot to Spec Cloud."""
+"""`spec publish` (`spec push` alias) — upload staged content to Spec Cloud."""
 
 from __future__ import annotations
 
@@ -160,7 +160,7 @@ def _push_all_bundles(
     failures: list[Path] = []
     for position, root in enumerate(roots, start=1):
         info("")
-        info(f"[{position}/{len(roots)}] Pushing {root}")
+        info(f"[{position}/{len(roots)}] Publishing {root}")
         if run_push_for_bundle(
             root,
             dry_run=dry_run,
@@ -188,21 +188,21 @@ def _push_all_bundles(
     help="Override cloud.project in the manifest. Accepts `<handle>/<slug>` "
     "or a bare slug (uses your handle from saved credentials).",
 )
-@click.option("--dry-run", is_flag=True, help="Show what would be pushed, don't upload.")
+@click.option("--dry-run", is_flag=True, help="Show what would be published, don't upload.")
 @click.option(
     "--all",
     "push_all",
     is_flag=True,
-    help="Push every registered or locally discovered Spec bundle.",
+    help="Publish every registered or locally discovered Spec bundle.",
 )
 @click.option(
     "--no-review",
     is_flag=True,
     help=(
-        "Skip the auto-open of a branch review. By default, pushing "
+        "Skip the auto-open of a branch review. By default, publishing "
         "from any non-trunk branch opens (or re-opens) a review on "
         "Cloud — that's the natural \"this work is ready for eyes\" "
-        "moment. Pass this flag to push silently."
+        "moment. Pass this flag to publish silently."
     ),
 )
 @click.option(
@@ -226,20 +226,20 @@ def push_cmd(
     no_review: bool,
     reviewers: tuple[str, ...],
 ) -> None:
-    """Upload the staged snapshot to Spec Cloud.
+    """Explicitly publish the staged snapshot to Spec Cloud.
 
     With no argument, pushes to the host in ~/.spec/credentials using
     `cloud.project` from spec.yaml (or --project). Pass a URL to push to
     an explicit remote, git-style:
 
-      spec push https://spec.lightreach.io/acme/billing.git
+      spec publish https://spec.lightreach.io/acme/billing.git
 
     If `cloud.project` points at your signed-in handle and that bundle
     does not exist yet, this command creates it on Cloud before uploading
     (the server may assign a suffixed slug when the base name is taken;
     `spec.yaml` is updated when that happens).
 
-    When the push originates from a non-trunk git branch, `spec push`
+    When publication originates from a non-trunk git branch, Spec
     automatically opens (or re-opens) a Cloud review on that branch —
     same shape as `gh pr create` after a `git push`. The first push
     creates the review; subsequent pushes are idempotent (server
@@ -247,13 +247,13 @@ def push_cmd(
     to opt out and `--reviewer email@example.com` to request specific
     reviewers up-front.
 
-    Pass `--all` to run the same push independently for every Spec bundle
+    Pass `--all` to run the same publication independently for every Spec bundle
     registered on this machine. Failures do not stop later bundles; the command
     exits non-zero after printing a complete summary when any push fails.
     """
     if push_all:
         if remote_url or project:
-            fatal("`spec push --all` cannot be combined with a URL or --project.")
+            fatal("`spec publish --all` cannot be combined with a URL or --project.")
             return
         _push_all_bundles(
             dry_run=dry_run,
