@@ -242,7 +242,7 @@ def _print_unmerged_branch_prompts(root, *, current_branch: str) -> None:
     "common review-and-push loop.",
 )
 def status_cmd(show_all: bool, show_ignored: bool) -> None:
-    """Show machine live state and what would be pushed from this bundle.
+    """Show machine live state and what this bundle would publish.
 
     Section names mirror **git status**: **Staged for push** is the snapshot
     queued for ``spec push`` (like changes to be committed). **Modified**

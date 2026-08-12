@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import copy
+
 import click
 
 from . import __version__
@@ -21,10 +23,10 @@ from .commands.login import login_cmd, logout_cmd
 from .commands.presence import presence_group
 from .commands.prompts import prompts_group
 from .commands.pull import pull_cmd
-from .commands.review import review_cmd
+from .commands.review import prs_cmd, review_cmd
 from .commands.push import push_cmd
 from .commands.shell import shell_group
-from .commands.team import team_cmd
+from .commands.team import team_cmd, team_watch_cmd
 from .commands.unstage import unstage_cmd
 from .commands.status import status_cmd
 from .commands.watch import watch_cmd
@@ -57,15 +59,36 @@ cli.add_command(logout_cmd)
 cli.add_command(status_cmd)
 cli.add_command(add_cmd)
 cli.add_command(unstage_cmd)
-cli.add_command(push_cmd)
+cli.add_command(push_cmd, name="publish")
+push_compat_cmd = copy(push_cmd)
+push_compat_cmd.hidden = True
+cli.add_command(push_compat_cmd, name="push")
 cli.add_command(pull_cmd)
 cli.add_command(review_cmd)
+cli.add_command(prs_cmd)
 cli.add_command(compile_cmd)
 cli.add_command(codex_group)
 cli.add_command(prompts_group)
 cli.add_command(log_cmd)
 cli.add_command(watch_cmd)
 cli.add_command(team_cmd)
+activity_cmd = copy(team_watch_cmd)
+activity_cmd.help = """Stream every agent turn across your Spec workspace.
+
+Shows prompts and assistant prose from Codex, Claude Code, Cursor, and
+Compress across every bundle you can access. Tool calls and large code blocks
+stay collapsed by default; add ``--show-tool-runs`` when you need the longer
+execution trace. This is receive-only and works outside a bundle directory.
+
+Examples:
+
+\b
+  spec activity
+  spec activity --show-tool-runs
+
+The compatible advanced spelling is ``spec team watch``.
+"""
+cli.add_command(activity_cmd, name="activity")
 cli.add_command(journal_group)
 cli.add_command(locks_group)
 cli.add_command(live_group)

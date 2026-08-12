@@ -1,4 +1,4 @@
-"""`spec add <paths…>` — stage files for the next push."""
+"""`spec add <paths…>` — stage files for the next publication."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ from ..ui import dim, fatal, info, ok, reject
 )
 def add_cmd(paths: tuple[str, ...], no_capture: bool, verbose: bool) -> None:
     """
-    Stage files for the next push.
+    Stage files for the next publication.
 
     Accepts file paths, directory paths, or `.`. Bundle membership for
     `.md` files is decided by the resolver in

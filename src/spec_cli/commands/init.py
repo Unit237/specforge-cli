@@ -547,6 +547,19 @@ def _install_agents_coordination_block(bundle_root: Path) -> tuple[str, Path]:
     return "appended", path
 
 
+def refresh_agent_rules(bundle_root: Path) -> None:
+    """Refresh the managed Cursor, Claude, and AGENTS coordination surfaces."""
+    root = bundle_root.expanduser().resolve()
+    cursor_rule_path = root / _CURSOR_RULES_DIRNAME / _CURSOR_RULE_FILENAME
+    cursor_rule_path.parent.mkdir(parents=True, exist_ok=True)
+    cursor_rule_path.write_text(_CURSOR_RULE_BODY, encoding="utf-8")
+    from .hooks import install_claude_settings
+
+    install_claude_settings(root, block_mode=False)
+    _install_agents_coordination_block(root)
+    remember_bundle(root)
+
+
 def _render_starter_prompts(author_name: str, author_email: str) -> str:
     """Materialize the starter `.prompts` with real timestamps + ids so
     the file parses against `spec.prompts/v0.1` without hand-editing."""
@@ -799,26 +812,11 @@ def init_cmd(
         except BundleNotFoundError as e:
             fatal(str(e))
             return
-        cursor_rule_path = bundle_root / _CURSOR_RULES_DIRNAME / _CURSOR_RULE_FILENAME
         try:
-            cursor_rule_path.parent.mkdir(parents=True, exist_ok=True)
-            cursor_rule_path.write_text(_CURSOR_RULE_BODY, encoding="utf-8")
+            refresh_agent_rules(bundle_root)
         except OSError as e:
-            fatal(f"Could not write Cursor rule: {e}")
+            fatal(f"Could not refresh agent rules: {e}")
             return
-        try:
-            from .hooks import install_claude_settings
-
-            install_claude_settings(bundle_root, block_mode=False)
-        except OSError as e:
-            fatal(f"Could not update Claude settings: {e}")
-            return
-        try:
-            _install_agents_coordination_block(bundle_root)
-        except OSError as e:
-            fatal(f"Could not update {AGENTS_FILENAME}: {e}")
-            return
-        remember_bundle(bundle_root)
         ok(
             "Spec Live rules refreshed — `.cursor/rules/spec-team-presence.mdc` "
             "plus Spec-managed `.claude/settings.json` and `AGENTS.md` blocks."

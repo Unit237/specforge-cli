@@ -19,6 +19,7 @@ from pathlib import Path
 import click
 
 from ..api import ApiError, CloudClient
+from ..cloud_binding import CloudBindingError, ensure_cloud_binding
 from ..config import (
     BundleNotFoundError,
     discover_bundle_roots_under_cwd,
@@ -30,6 +31,7 @@ from ..preferences import Preferences, load_preferences
 from ..realtime import WatcherStartError, is_running, start_in_background, stop_daemon
 from ..realtime.active_edits import ActiveEditsStore
 from ..ui import console, dim, ok, warn
+from .init import refresh_agent_rules
 
 
 def _current_bundle_roots() -> list[Path]:
@@ -53,6 +55,10 @@ def _known_bundle_roots(
     """Return valid, unique registered roots plus a stale-entry count."""
     values = list(prefs.bundles)
     current_roots = _current_bundle_roots() if include_current else []
+    for raw in prefs.discovery_roots:
+        workspace = Path(raw).expanduser().resolve()
+        if workspace.is_dir():
+            current_roots.extend(discover_bundle_roots_under_cwd(workspace))
     for current in current_roots:
         if str(current) not in values:
             values.append(str(current))
@@ -90,13 +96,7 @@ def _missing_agent_rules(root: Path) -> bool:
 
 
 def _bundle_is_cloud_bound(root: Path) -> bool:
-    """Whether a watcher has an immutable Cloud project to connect to.
-
-    Example/scaffold bundles commonly have a ``spec.yaml`` but no server-minted
-    ``cloud.bundle_id`` yet. Starting those from a parent workspace creates a
-    daemon that can only fail project resolution. ``spec push`` establishes the
-    binding; after that the next ``spec on`` includes it automatically.
-    """
+    """Whether a watcher has an immutable Cloud project to connect to."""
     try:
         manifest = load_manifest(root)
     except Exception:  # noqa: BLE001 — status must remain fail-open
@@ -140,12 +140,12 @@ def print_workday_status(*, include_bundles: bool = True) -> None:
     is_on = not prefs.prompt_stream_muted and not prefs.autostart_disabled
 
     state = "ON" if is_on else "OFF"
-    console.print(f"[sf.label]Spec workday[/] [bold]{state}[/]")
+    console.print(f"[sf.label]Spec[/] [bold]{state}[/]")
     dim(
-        f"  sharing: {'enabled' if not prefs.prompt_stream_muted else 'muted'}"
-        f" · autostart: {'enabled' if not prefs.autostart_disabled else 'disabled'}"
-        f" · watchers: {running_count}/{bound_count} running"
-        + (f" · unbound: {unbound_count}" if unbound_count else "")
+        f"  {len(roots)} project{'s' if len(roots) != 1 else ''} known"
+        f" · {running_count} watching"
+        + (f" · {unbound_count} need connection" if unbound_count else "")
+        + (f" · {bound_count - running_count} stopped" if bound_count > running_count else "")
     )
     if os.environ.get("SPEC_NO_AUTOSTART", "").strip() == "1":
         warn("SPEC_NO_AUTOSTART=1 is set in this shell; automatic starts are suppressed.")
@@ -155,25 +155,25 @@ def print_workday_status(*, include_bundles: bool = True) -> None:
     if not include_bundles:
         return
     if not roots:
-        dim("  no bundles registered yet — run `spec on` from a Spec bundle once.")
+        dim("  No projects found. Run `spec discover` once.")
         return
     for root, record in running:
         if not bound[root]:
-            dim(f"  ○ {root} · unbound (run `spec push` first)")
+            dim(f"  Needs connection  {root}")
         elif record is None:
-            dim(f"  ○ {root} · stopped")
+            dim(f"  Stopped           {root}")
         else:
-            dim(f"  ● {root} · pid {record.pid}")
+            dim(f"  Watching          {root} · pid {record.pid}")
 
 
 @click.command("on")
 def workday_on_cmd() -> None:
     """Turn Spec on for this machine and start known bundle watchers.
 
-    This is the start-of-workday command. It removes the machine mute,
-    enables shell autostart, remembers the current bundle (when applicable),
-    prunes missing bundle paths, and idempotently starts each known watcher.
-    Per-bundle ``cloud.prompt_stream`` policy remains authoritative.
+    This is the start-of-workday command. It discovers bundles beneath saved
+    workspace roots, connects any fresh bundle without uploading its contents,
+    and idempotently starts each known watcher. Per-bundle
+    ``cloud.prompt_stream`` policy remains authoritative.
     """
     prefs = load_preferences()
     prefs.prompt_stream = "default"
@@ -191,15 +191,25 @@ def workday_on_cmd() -> None:
 
     started = 0
     already_running = 0
+    connected = 0
+    rules_refreshed = 0
     failures: list[tuple[Path, str]] = []
     missing_rules: list[Path] = []
-    unbound: list[Path] = []
     for root in roots:
         if not _bundle_is_cloud_bound(root):
-            unbound.append(root)
-            continue
+            try:
+                binding = ensure_cloud_binding(root, credentials=creds)
+            except (CloudBindingError, ApiError) as exc:
+                failures.append((root, str(exc)))
+                continue
+            if binding.changed_manifest:
+                connected += 1
         if _missing_agent_rules(root):
-            missing_rules.append(root)
+            try:
+                refresh_agent_rules(root)
+                rules_refreshed += 1
+            except OSError:
+                missing_rules.append(root)
         try:
             outcome = start_in_background(root)
         except WatcherStartError as exc:
@@ -212,21 +222,16 @@ def workday_on_cmd() -> None:
 
     ok(
         "Spec is ON for this machine "
-        f"({started} started, {already_running} already running)."
+        f"({connected} connected, {started} started, "
+        f"{already_running} already watching, {rules_refreshed} rules refreshed)."
     )
     if stale:
         dim(f"  pruned {stale} missing bundle registration(s).")
     for root, message in failures:
-        warn(f"Could not start {root}: {message}")
-    if unbound:
-        dim(
-            f"  skipped {len(unbound)} unbound bundle(s); run `spec push` in them "
-            "before enabling their watcher."
-        )
+        warn(f"Could not connect or start {root}: {message}")
     if missing_rules:
         warn(
-            f"{len(missing_rules)} bundle(s) need current agent rules; run "
-            "`spec init --upgrade-rules` in each listed bundle."
+            f"{len(missing_rules)} project(s) could not refresh their managed agent rules."
         )
         for root in missing_rules:
             dim(f"  {root}")

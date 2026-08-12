@@ -143,7 +143,7 @@ def test_spec_on_from_workspace_registers_all_peer_bundles(tmp_path, monkeypatch
     assert load_preferences().bundles == [str(first.resolve()), str(second.resolve())]
 
 
-def test_spec_on_registers_but_does_not_start_unbound_example(tmp_path, monkeypatch):
+def test_spec_on_connects_and_starts_fresh_example(tmp_path, monkeypatch):
     monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
     root = _named_bundle(tmp_path, "example")
     (root / "spec.yaml").write_text(
@@ -156,16 +156,34 @@ def test_spec_on_registers_but_does_not_start_unbound_example(tmp_path, monkeypa
         lambda: SimpleNamespace(access_token="token"),
     )
     monkeypatch.setattr("spec_cli.commands.workday._cloud_login_error", lambda _c: None)
+    connected: list[Path] = []
+    monkeypatch.setattr(
+        "spec_cli.commands.workday.ensure_cloud_binding",
+        lambda bundle_root, credentials: (
+            connected.append(bundle_root)
+            or SimpleNamespace(changed_manifest=True)
+        ),
+    )
+    started: list[Path] = []
     monkeypatch.setattr(
         "spec_cli.commands.workday.start_in_background",
-        lambda _root: (_ for _ in ()).throw(AssertionError("must not start")),
+        lambda bundle_root: (
+            started.append(bundle_root)
+            or StartOutcome(
+                pid=123,
+                log_path=bundle_root / ".spec" / "watch.log",
+                pid_path=bundle_root / ".spec" / "watch.pid",
+                already_running=False,
+            )
+        ),
     )
 
     result = CliRunner().invoke(cli, ["on"])
 
     assert result.exit_code == 0, result.output
-    assert "skipped 1 unbound bundle" in result.output
-    assert "unbound (run `spec push` first)" in result.output
+    assert connected == [root.resolve()]
+    assert started == [root.resolve()]
+    assert "1 connected, 1 started" in result.output
 
 
 def test_spec_on_preflights_expired_login_before_starting_watchers(
@@ -240,6 +258,6 @@ def test_spec_status_works_outside_a_bundle(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ["status"])
 
     assert result.exit_code == 0, result.output
-    assert "Spec workday" in result.output
+    assert "Spec OFF" in result.output
     assert "OFF" in result.output
     assert "machine status only" in result.output
