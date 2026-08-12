@@ -350,7 +350,11 @@ class IncomingEvent:
             broadcast_client_id = bc_raw.strip()[:128]
         return cls(
             id=int(payload["id"]),
-            project_id=int(payload["project_id"]),
+            # Workspace activity is deliberately repository-neutral, so the
+            # Cloud wire shape carries ``project_id: null``.  Keep the local
+            # model numeric for the existing project-only consumers and use
+            # zero as the sentinel for "no project".
+            project_id=int(payload.get("project_id") or 0),
             session_id=str(payload.get("session_id") or ""),
             source=str(payload.get("source") or ""),
             role=str(payload.get("role") or ""),
