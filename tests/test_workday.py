@@ -10,6 +10,7 @@ from spec_cli.cli import cli
 from spec_cli.preferences import Preferences, load_preferences, remember_bundle
 from spec_cli.realtime import StartOutcome, StopOutcome
 from spec_cli.realtime.active_edits import ActiveEditsStore
+from spec_cli.commands.workday import _known_bundle_roots
 
 
 def _bundle(tmp_path: Path) -> Path:
@@ -67,6 +68,23 @@ def test_preferences_ignore_disposable_codex_worktrees(tmp_path, monkeypatch):
 
     remember_bundle(transient)
     assert load_preferences().bundles == [str(stable)]
+
+
+def test_workspace_rescan_ignores_disposable_codex_worktrees(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    stable = _named_bundle(workspace, "stable")
+    transient_parent = workspace / ".codex-worktrees"
+    transient_parent.mkdir()
+    _named_bundle(transient_parent, "task-123")
+    prefs = Preferences(discovery_roots=[str(workspace)])
+
+    roots, stale = _known_bundle_roots(prefs, include_current=False, prune=True)
+
+    assert roots == [stable.resolve()]
+    assert stale == 0
+    assert load_preferences().bundles == [str(stable.resolve())]
 
 
 def test_remember_bundle_fails_open_when_preferences_directory_is_read_only(

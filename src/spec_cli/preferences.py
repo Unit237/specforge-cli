@@ -64,7 +64,7 @@ PREFERENCES_SCHEMA_VERSION = 1
 _TRANSIENT_BUNDLE_DIRS = frozenset({".codex-worktrees"})
 
 
-def _is_transient_bundle_root(value: str | Path) -> bool:
+def is_transient_bundle_root(value: str | Path) -> bool:
     """Return whether VALUE belongs to an agent's disposable worktree area."""
     parts = {part.casefold() for part in Path(value).expanduser().parts}
     return bool(parts & _TRANSIENT_BUNDLE_DIRS)
@@ -159,7 +159,7 @@ class Preferences:
                 if (
                     isinstance(value, str)
                     and value
-                    and not _is_transient_bundle_root(value)
+                    and not is_transient_bundle_root(value)
                     and value not in bundles
                 ):
                     bundles.append(value)
@@ -245,7 +245,7 @@ def remember_bundle(bundle_root: Path) -> Preferences:
     """
     root = str(bundle_root.expanduser().resolve())
     prefs = load_preferences()
-    if _is_transient_bundle_root(root):
+    if is_transient_bundle_root(root):
         return prefs
     if root not in prefs.bundles:
         prefs.bundles.append(root)
@@ -267,6 +267,7 @@ __all__ = [
     "PREFERENCES_FILENAME",
     "PREFERENCES_SCHEMA_VERSION",
     "Preferences",
+    "is_transient_bundle_root",
     "load_preferences",
     "remember_bundle",
     "remember_discovery_root",
