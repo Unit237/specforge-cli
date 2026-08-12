@@ -17,6 +17,32 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+# Keep these limits in lockstep with ``backend/app/schemas.py``.  Transcript
+# stores are controlled by four different applications and occasionally carry
+# fields that are much larger than Spec's wire contract (Codex titles are one
+# real example).  Normalizing at this final serialization boundary protects
+# every adapter, including presence and synthetic close events.
+_MAX_TURN_TEXT_CHARS = 512 * 1024
+_MAX_SUMMARY_CHARS = 2000
+_MAX_TITLE_CHARS = 200
+_MAX_MODEL_CHARS = 128
+_MAX_SESSION_ID_CHARS = 128
+_MAX_BRANCH_CHARS = 255
+_MAX_COMMIT_SHA_CHARS = 128
+_MAX_CWD_CHARS = 1024
+_MAX_PATH_ENTRIES = 64
+_MAX_PATH_CHARS = 1024
+_MAX_TOOL_CALLS = 256
+_MAX_TOOL_NAME_CHARS = 64
+_MAX_TOOL_STATUS_CHARS = 32
+
+
+def _clip(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    return value[:limit]
+
+
 def _isoformat(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -57,7 +83,7 @@ class PresenceFile:
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "path": self.path,
+            "path": _clip(self.path, _MAX_PATH_CHARS) or "",
             "lines_added": int(self.lines_added),
             "lines_removed": int(self.lines_removed),
             "untracked": bool(self.untracked),
@@ -134,9 +160,12 @@ class ToolCallPayload:
     status: str | None = None
 
     def to_json(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"name": self.name, "args": dict(self.args or {})}
+        out: dict[str, Any] = {
+            "name": _clip(self.name, _MAX_TOOL_NAME_CHARS) or "",
+            "args": dict(self.args or {}),
+        }
         if self.status is not None:
-            out["status"] = self.status
+            out["status"] = _clip(self.status, _MAX_TOOL_STATUS_CHARS)
         return out
 
     @classmethod
@@ -188,21 +217,29 @@ class OutgoingEvent:
     broadcast_client_id: str | None = None
 
     def to_json(self) -> dict[str, Any]:
+        paths = [
+            clipped
+            for raw in (self.paths_touched or [])[:_MAX_PATH_ENTRIES]
+            if isinstance(raw, str)
+            and (clipped := _clip(raw.strip(), _MAX_PATH_CHARS))
+        ]
         out: dict[str, Any] = {
-            "session_id": self.session_id,
+            "session_id": _clip(self.session_id, _MAX_SESSION_ID_CHARS),
             "source": self.source,
             "role": self.role,
-            "branch": self.branch,
-            "commit_sha": self.commit_sha,
-            "model": self.model,
-            "summary": self.summary,
-            "text": self.text,
-            "title": self.title,
-            "cwd": self.cwd,
-            "paths_touched": list(self.paths_touched or []),
+            "branch": _clip(self.branch, _MAX_BRANCH_CHARS),
+            "commit_sha": _clip(self.commit_sha, _MAX_COMMIT_SHA_CHARS),
+            "model": _clip(self.model, _MAX_MODEL_CHARS),
+            "summary": _clip(self.summary, _MAX_SUMMARY_CHARS),
+            "text": _clip(self.text, _MAX_TURN_TEXT_CHARS),
+            "title": _clip(self.title, _MAX_TITLE_CHARS),
+            "cwd": _clip(self.cwd, _MAX_CWD_CHARS),
+            "paths_touched": paths,
             "presence": self.presence.to_json() if self.presence else None,
             "turn_at": _isoformat(self.turn_at),
-            "tool_calls": [c.to_json() for c in (self.tool_calls or [])],
+            "tool_calls": [
+                c.to_json() for c in (self.tool_calls or [])[:_MAX_TOOL_CALLS]
+            ],
         }
         if self.closes_event_id is not None and self.closes_event_id >= 1:
             out["closes_event_id"] = self.closes_event_id

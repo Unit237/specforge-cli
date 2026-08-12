@@ -7,6 +7,7 @@ from pathlib import Path
 
 from spec_cli.prompts.schema import Session, Turn
 from spec_cli.realtime import watcher as watcher_mod
+from spec_cli.preferences import Preferences
 
 
 def test_iter_local_sessions_newest_first(monkeypatch, tmp_path: Path) -> None:
@@ -44,3 +45,62 @@ def test_iter_local_sessions_newest_first(monkeypatch, tmp_path: Path) -> None:
 
     ids = [s.id for s in watcher_mod._iter_local_sessions([tmp_path])]
     assert ids == ["cursor-new", "cursor-old"]
+
+
+def test_ambiguous_parent_workspace_sessions_require_touched_bundle(
+    monkeypatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    signal = workspace / "signal"
+    actionairy = workspace / "actionairy"
+    signal.mkdir(parents=True)
+    actionairy.mkdir()
+    prefs = Preferences(bundles=[str(signal), str(actionairy)])
+    monkeypatch.setattr(watcher_mod, "load_preferences", lambda: prefs)
+
+    ambiguous = Session(
+        id="ambiguous",
+        source="codex",
+        cwd=str(workspace),
+        turns=[Turn(role="user", text="work across the workspace")],
+    )
+    actionairy_only = Session(
+        id="actionairy-only",
+        source="codex",
+        cwd=str(workspace),
+        paths_touched=["actionairy/lib/contact.dart"],
+        turns=[Turn(role="user", text="fix a contact")],
+    )
+    signal_only = Session(
+        id="signal-only",
+        source="codex",
+        cwd=str(workspace),
+        paths_touched=["signal/src/reply.ts"],
+        turns=[Turn(role="user", text="fix a reply")],
+    )
+
+    scoped = list(
+        watcher_mod._scoped_sessions(
+            [ambiguous, actionairy_only, signal_only], [signal]
+        )
+    )
+
+    assert [session.id for session in scoped] == ["signal-only"]
+
+
+def test_parent_workspace_session_is_allowed_for_only_registered_child(
+    monkeypatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    signal = workspace / "signal"
+    signal.mkdir(parents=True)
+    prefs = Preferences(bundles=[str(signal)])
+    monkeypatch.setattr(watcher_mod, "load_preferences", lambda: prefs)
+    session = Session(
+        id="only-child",
+        source="claude_code",
+        cwd=str(workspace),
+        turns=[Turn(role="user", text="fix the project")],
+    )
+
+    assert list(watcher_mod._scoped_sessions([session], [signal])) == [session]

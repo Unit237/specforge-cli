@@ -35,6 +35,7 @@ from typing import Iterable
 
 from ..api import ApiError, CloudClient
 from ..git import read_git_context
+from ..preferences import load_preferences
 from ..prompts.schema import Session, Turn
 from ..prompts.text_sanitize import (
     is_cursor_redacted_placeholder,
@@ -225,7 +226,7 @@ def _post_assistant_closed(
         model=session.model,
         summary=None,
         text=None,
-        title=(session.title or "").strip() or None,
+        title=redact_text((session.title or "").strip()) or None,
         cwd=session.cwd,
         paths_touched=list(session.paths_touched or []),
         turn_at=_now_utc(),
@@ -366,7 +367,10 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
                 n_cursor = sum(
                     1
                     for _ in itertools.islice(
-                        read_cursor_sessions(paths, verbose=True), 400
+                        _scoped_sessions(
+                            read_cursor_sessions(paths, verbose=True), paths
+                        ),
+                        400,
                     )
                 )
                 bits.append(f"cursor: {n_cursor} composer session(s) for this bundle")
@@ -380,7 +384,12 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
             n_claude = sum(
                 1
                 for _ in itertools.islice(
-                    read_claude_code_sessions(paths, since=None, verbose=True),
+                    _scoped_sessions(
+                        read_claude_code_sessions(
+                            paths, since=None, verbose=True
+                        ),
+                        paths,
+                    ),
                     400,
                 )
             )
@@ -397,7 +406,11 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
             n_codex = sum(
                 1
                 for _ in itertools.islice(
-                    read_codex_sessions(paths, since=None, verbose=True), 400
+                    _scoped_sessions(
+                        read_codex_sessions(paths, since=None, verbose=True),
+                        paths,
+                    ),
+                    400,
                 )
             )
             bits.append(f"codex: {n_codex} session(s)")
@@ -413,7 +426,11 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
             n_compress = sum(
                 1
                 for _ in itertools.islice(
-                    read_compress_sessions(paths, since=None, verbose=True), 400
+                    _scoped_sessions(
+                        read_compress_sessions(paths, since=None, verbose=True),
+                        paths,
+                    ),
+                    400,
                 )
             )
             bits.append(f"compress: {n_compress} session(s)")
@@ -488,7 +505,7 @@ def run_watcher(
         notifier.announce_broadcast_disabled()
     else:
         _spec_live_startup_snapshot(bundle_root)
-        emit_live_doctor_warnings(bundle_root)
+        emit_live_doctor_warnings(bundle_root, watcher_running_here=True)
 
     if stop_event is None:
         stop_event = threading.Event()
@@ -730,7 +747,7 @@ def run_watcher(
                 and now - last_prompt_post_mono >= QUIET_PROMPT_POST_SECS
                 and now - last_doctor_mono >= QUIET_PROMPT_POST_SECS
             ):
-                emit_live_doctor_warnings(bundle_root)
+                emit_live_doctor_warnings(bundle_root, watcher_running_here=True)
                 last_doctor_mono = now
 
             # Presence broadcast — gated by `presence_enabled` so a
@@ -1174,7 +1191,84 @@ def _iter_local_sessions(paths) -> Iterable[Session]:  # type: ignore[no-untyped
         return s.ended_at or s.started_at or epoch
 
     sessions.sort(key=_recency_key, reverse=True)
-    yield from sessions
+    yield from _scoped_sessions(sessions, paths)
+
+
+def _scoped_sessions(
+    sessions: Iterable[Session],
+    bundle_paths,
+) -> Iterable[Session]:  # type: ignore[no-untyped-def]
+    """Drop sessions whose parent-workspace scope is ambiguous.
+
+    A Codex/Claude/Cursor session launched at a common workspace root used to
+    match every registered child bundle.  Every watcher then replayed the same
+    prompt into a different Cloud project, leaking unrelated prompts across
+    project boundaries and multiplying traffic.  Exact/in-bundle working
+    directories remain unambiguous.  A parent-workspace session is admitted
+    only when recorded touched paths identify this bundle (or this is the only
+    registered child bundle under that parent).
+
+    If the current root is not in the registry, preserve the historical
+    behavior; that covers direct ``spec watch`` use before machine discovery.
+    """
+    paths = [Path(value).expanduser().resolve() for value in bundle_paths]
+    if not paths:
+        return
+    current = paths[0]
+    registered: list[Path] = []
+    for raw in load_preferences().bundles:
+        try:
+            root = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        if root not in registered:
+            registered.append(root)
+    if current not in registered:
+        yield from sessions
+        return
+
+    for session in sessions:
+        raw_cwd = (session.cwd or "").strip()
+        if not raw_cwd:
+            # Adapters already performed their own bundle lookup; without a
+            # cwd there is no new evidence that the result is ambiguous.
+            yield session
+            continue
+        try:
+            cwd = Path(raw_cwd).expanduser().resolve()
+        except OSError:
+            continue
+        if cwd == current or current in cwd.parents:
+            yield session
+            continue
+        if cwd not in current.parents:
+            continue
+
+        candidates = [
+            root
+            for root in registered
+            if root == cwd or cwd in root.parents
+        ]
+        if len(candidates) <= 1:
+            yield session
+            continue
+
+        touched_candidates: set[Path] = set()
+        for raw_path in session.paths_touched or []:
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            candidate_path = Path(raw_path).expanduser()
+            if not candidate_path.is_absolute():
+                candidate_path = cwd / candidate_path
+            try:
+                candidate_path = candidate_path.resolve()
+            except OSError:
+                continue
+            for root in candidates:
+                if candidate_path == root or root in candidate_path.parents:
+                    touched_candidates.add(root)
+        if current in touched_candidates:
+            yield session
 
 
 def _build_outgoing(
@@ -1199,7 +1293,7 @@ def _build_outgoing(
     if role is None:
         return None
 
-    title = (session.title or "").strip() or None
+    title = redact_text((session.title or "").strip()) or None
 
     if role == "user":
         body = unwrap_cursor_user_message((turn.text or "").strip())
