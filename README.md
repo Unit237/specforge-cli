@@ -252,6 +252,12 @@ those known bundle watchers idempotently. `spec off` mutes this machine before
 stopping them, so a shell hook cannot race the shutdown. It controls local
 coordination only; cloud-side PR jobs are configured and run separately.
 
+You can launch an agent from a non-git folder that contains several registered
+repositories. Spec does not initialize that folder or invent a repository for
+it. A conversation that touches one child repository is routed there; a
+conversation that spans multiple children (or none) is emitted once as
+**workspace** activity and is visible in `spec activity` from any folder.
+
 Fresh bundles no longer need a content push before they can be watched.
 `spec on` resolves or creates the Cloud identity and stamps the immutable
 `cloud.bundle_id`, without uploading staged files. If connection fails,

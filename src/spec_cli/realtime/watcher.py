@@ -199,7 +199,7 @@ def _post_assistant_closed(
     poster: HTTPPoster,
     session: Session,
     *,
-    branch: str,
+    branch: str | None,
     git,
     opts: WatcherOptions,
     last_assistant_cloud_id: int | None,
@@ -574,6 +574,7 @@ def run_watcher(
             pass
 
     poster: HTTPPoster | None = None
+    workspace_poster: HTTPPoster | None = None
     consumer: SSEConsumer | None = None
     consumer_thread: threading.Thread | None = None
     mirror = PeerMirror(bundle_root) if opts.mirror else None
@@ -595,6 +596,13 @@ def run_watcher(
     if opts.broadcast:
         poster = HTTPPoster(
             opts.api_base, opts.access_token, opts.project_id, user_agent=opts.user_agent
+        )
+        workspace_poster = HTTPPoster(
+            opts.api_base,
+            opts.access_token,
+            None,
+            workspace=True,
+            user_agent=opts.user_agent,
         )
 
     if opts.receive:
@@ -739,6 +747,7 @@ def run_watcher(
                         bundle_root=bundle_root,
                         cursor=cursor,
                         poster=poster,
+                        workspace_poster=workspace_poster,
                         opts=opts,
                         stop_event=stop_event,
                         assistant_tail_holds=assistant_tail_holds,
@@ -852,6 +861,8 @@ def run_watcher(
         cursor.save()
         if poster is not None:
             poster.close()
+        if workspace_poster is not None:
+            workspace_poster.close()
         # Restore the signal handlers we replaced so a host process
         # (tests, embedding) sees its original behaviour after the
         # watcher returns.
@@ -965,6 +976,7 @@ def _producer_tick(
     bundle_root: Path,
     cursor: LiveCursor,
     poster: HTTPPoster,
+    workspace_poster: HTTPPoster | None = None,
     opts: WatcherOptions,
     stop_event: threading.Event,
     assistant_tail_holds: dict[str, _AssistantTailHold] | None = None,
@@ -1009,6 +1021,12 @@ def _producer_tick(
     for session in _iter_local_sessions(paths):
         if stop_event.is_set():
             return posted_count
+        route = _session_route(session, paths)
+        session_poster = workspace_poster if route == "workspace" else poster
+        if session_poster is None:
+            continue
+        event_branch = None if route == "workspace" else branch
+        event_git = None if route == "workspace" else git
         if (
             cursor.producer_baseline_version >= PRODUCER_BASELINE_VERSION
             and not cursor.has_session(session.id)
@@ -1042,7 +1060,13 @@ def _producer_tick(
         for offset, turn in enumerate(new_turns):
             if stop_event.is_set():
                 return posted_count
-            event = _build_outgoing(session, turn, branch=branch, git=git, opts=opts)
+            event = _build_outgoing(
+                session,
+                turn,
+                branch=event_branch,
+                git=event_git,
+                opts=opts,
+            )
             if event is None:
                 # Retry empty / undeliverable slots — do not advance the
                 # broadcast cursor until we POST or exhaust retries.
@@ -1088,10 +1112,10 @@ def _producer_tick(
                         cursor.record_broadcast(session.id, turn_idx + 1)
                         cursor.mark_turn_posted(session.id, turn_idx, turn)
                         _post_assistant_closed(
-                            poster,
+                            session_poster,
                             session,
-                            branch=branch,
-                            git=git,
+                            branch=event_branch,
+                            git=event_git,
                             opts=opts,
                             last_assistant_cloud_id=cloud_ids.get(session.id),
                         )
@@ -1105,7 +1129,7 @@ def _producer_tick(
                 cursor.record_broadcast(session.id, turn_idx + 1)
                 continue
 
-            ok, created_id = poster.send(event)
+            ok, created_id = session_poster.send(event)
             if ok:
                 posted_count += 1
             if not ok:
@@ -1147,10 +1171,10 @@ def _producer_tick(
             cursor.record_broadcast(session.id, turn_idx + 1)
             if turn.role == "assistant":
                 _post_assistant_closed(
-                    poster,
+                    session_poster,
                     session,
-                    branch=branch,
-                    git=git,
+                    branch=event_branch,
+                    git=event_git,
                     opts=opts,
                     last_assistant_cloud_id=cloud_ids.get(session.id),
                 )
@@ -1236,22 +1260,33 @@ def _scoped_sessions(
     sessions: Iterable[Session],
     bundle_paths,
 ) -> Iterable[Session]:  # type: ignore[no-untyped-def]
-    """Drop sessions whose parent-workspace scope is ambiguous.
+    """Route parent-workspace sessions through exactly one local watcher.
 
     A Codex/Claude/Cursor session launched at a common workspace root used to
     match every registered child bundle.  Every watcher then replayed the same
     prompt into a different Cloud project, leaking unrelated prompts across
     project boundaries and multiplying traffic.  Exact/in-bundle working
-    directories remain unambiguous.  A parent-workspace session is admitted
-    only when recorded touched paths identify this bundle (or this is the only
-    registered child bundle under that parent).
+    directories remain unambiguous. A parent-workspace session touching one
+    child is admitted by that child's watcher. A session touching multiple
+    children (or none) is admitted by one deterministic watcher and posted to
+    the workspace endpoint, never to an arbitrary project.
 
     If the current root is not in the registry, preserve the historical
     behavior; that covers direct ``spec watch`` use before machine discovery.
     """
+    for session in sessions:
+        if _session_route(session, bundle_paths) != "skip":
+            yield session
+
+
+def _session_route(
+    session: Session,
+    bundle_paths,
+) -> str:  # type: ignore[no-untyped-def]
+    """Return ``project``, ``workspace``, or ``skip`` for this watcher."""
     paths = [Path(value).expanduser().resolve() for value in bundle_paths]
     if not paths:
-        return
+        return "skip"
     current = paths[0]
     registered: list[Path] = []
     for raw in load_preferences().bundles:
@@ -1262,58 +1297,52 @@ def _scoped_sessions(
         if root not in registered:
             registered.append(root)
     if current not in registered:
-        yield from sessions
-        return
+        return "project"
 
-    for session in sessions:
-        raw_cwd = (session.cwd or "").strip()
-        if not raw_cwd:
-            # Adapters already performed their own bundle lookup; without a
-            # cwd there is no new evidence that the result is ambiguous.
-            yield session
+    raw_cwd = (session.cwd or "").strip()
+    if not raw_cwd:
+        return "project"
+    try:
+        cwd = Path(raw_cwd).expanduser().resolve()
+    except OSError:
+        return "skip"
+    if cwd == current or current in cwd.parents:
+        return "project"
+    if cwd not in current.parents:
+        return "skip"
+
+    candidates = sorted(
+        (root for root in registered if root == cwd or cwd in root.parents),
+        key=lambda root: str(root).lower(),
+    )
+    if len(candidates) <= 1:
+        return "project"
+
+    touched_candidates: set[Path] = set()
+    for raw_path in session.paths_touched or []:
+        if not isinstance(raw_path, str) or not raw_path.strip():
             continue
+        candidate_path = Path(raw_path).expanduser()
+        if not candidate_path.is_absolute():
+            candidate_path = cwd / candidate_path
         try:
-            cwd = Path(raw_cwd).expanduser().resolve()
+            candidate_path = candidate_path.resolve()
         except OSError:
             continue
-        if cwd == current or current in cwd.parents:
-            yield session
-            continue
-        if cwd not in current.parents:
-            continue
+        for root in candidates:
+            if candidate_path == root or root in candidate_path.parents:
+                touched_candidates.add(root)
 
-        candidates = [
-            root
-            for root in registered
-            if root == cwd or cwd in root.parents
-        ]
-        if len(candidates) <= 1:
-            yield session
-            continue
-
-        touched_candidates: set[Path] = set()
-        for raw_path in session.paths_touched or []:
-            if not isinstance(raw_path, str) or not raw_path.strip():
-                continue
-            candidate_path = Path(raw_path).expanduser()
-            if not candidate_path.is_absolute():
-                candidate_path = cwd / candidate_path
-            try:
-                candidate_path = candidate_path.resolve()
-            except OSError:
-                continue
-            for root in candidates:
-                if candidate_path == root or root in candidate_path.parents:
-                    touched_candidates.add(root)
-        if current in touched_candidates:
-            yield session
+    if len(touched_candidates) == 1:
+        return "project" if current in touched_candidates else "skip"
+    return "workspace" if current == candidates[0] else "skip"
 
 
 def _build_outgoing(
     session: Session,
     turn: Turn,
     *,
-    branch: str,
+    branch: str | None,
     git,
     opts: WatcherOptions,
 ) -> OutgoingEvent | None:
