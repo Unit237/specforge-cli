@@ -75,7 +75,7 @@ from .presence import (
 )
 from .presence_mirror import TeamPresenceMirror
 from .live_doctor import QUIET_PROMPT_POST_SECS, emit_live_doctor_warnings
-from .tracker import LiveCursor
+from .tracker import LiveCursor, PRODUCER_BASELINE_VERSION
 from .transport import (
     HTTPPoster,
     SSEConsumer,
@@ -288,6 +288,9 @@ class WatcherOptions:
     user_agent: str = field(
         default_factory=lambda: "spec-cli/live"
     )
+    started_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
 
 # Throttle terminal noise when the cloud POST path is failing every tick.
@@ -488,6 +491,13 @@ def run_watcher(
     if opts.broadcast_client_id is None:
         opts.broadcast_client_id = load_or_create_broadcast_client_id(
             bundle_root
+        )
+
+    baselined = _establish_live_baseline(cursor, bundle_root)
+    if baselined and opts.broadcast:
+        dim(
+            "Spec Live baseline · "
+            f"skipped {baselined} existing local session(s); watching new turns"
         )
 
     notifier = Notifier(
@@ -999,6 +1009,14 @@ def _producer_tick(
     for session in _iter_local_sessions(paths):
         if stop_event.is_set():
             return posted_count
+        if (
+            cursor.producer_baseline_version >= PRODUCER_BASELINE_VERSION
+            and not cursor.has_session(session.id)
+        ):
+            observed_at = session.started_at or session.ended_at
+            if observed_at is None or _as_utc(observed_at) < opts.started_at:
+                cursor.record_broadcast(session.id, len(session.turns))
+                continue
         prev = cursor.turns_broadcast_for(session.id)
         # Cursor (and other adapters) can shrink on-disk turn lists while
         # our cursor still counts empty skips we advanced past without a
@@ -1140,6 +1158,26 @@ def _producer_tick(
         cursor.clamp_broadcast(session.id, len(session.turns))
 
     return posted_count
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _establish_live_baseline(cursor: LiveCursor, bundle_root: Path) -> int:
+    """Mark existing transcript turns as seen before opening the live tail."""
+    if cursor.producer_baseline_version >= PRODUCER_BASELINE_VERSION:
+        return 0
+    count = 0
+    paths = historical_bundle_paths(bundle_root)
+    for session in _iter_local_sessions(paths):
+        cursor.record_broadcast(session.id, len(session.turns))
+        count += 1
+    cursor.mark_producer_baseline()
+    cursor.save()
+    return count
 
 
 def _iter_local_sessions(paths) -> Iterable[Session]:  # type: ignore[no-untyped-def]

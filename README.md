@@ -69,6 +69,9 @@ registry so they cannot start duplicate watchers for the same repository.
 then starts all registered watchers idempotently. It does **not** upload bundle
 files. Content transfer is the separate, explicit `spec publish` command;
 `spec push` remains a compatibility alias for hooks and older scripts.
+On a watcher's first start, existing local transcript history becomes its live
+baseline rather than being uploaded as a backlog. Only subsequent turns stream;
+use `spec prompts capture` when you deliberately want historical sessions.
 
 To request review for the current PR (or choose from all open watched PRs):
 
@@ -90,6 +93,7 @@ For a single new project:
 ```bash
 # Scaffold a new bundle
 mkdir billing-service-rewrite && cd billing-service-rewrite
+git init
 spec init
 
 # Capture prior prompt history from Claude Code (optional; captures what
@@ -108,7 +112,12 @@ spec compile
 
 ## Git hooks
 
-`spec init` inside a git repo installs **pre-commit** (captures sessions and
+`spec init` only initializes a valid Git working tree. It resolves
+`git rev-parse --show-toplevel`, so invoking it in a subdirectory initializes
+the repository root; outside Git it exits before writing anything. This also
+supports Git worktrees, whose `.git` is a file rather than a directory.
+
+`spec init` installs **pre-commit** (captures sessions and
 mirrors `git add` into `spec add` / `spec unstage` for bundle paths, including
 **renames**), a compatibility-only **commit-msg** hook, **pre-push**
 (`spec push` when you `git push` a
@@ -117,8 +126,9 @@ bundle alignment check — stderr hints only when something is off, no Cloud
 round-trip). Refresh with `spec git-hooks install`. Remove Spec hook blocks from
 `.git/hooks/` with `spec git-hooks uninstall` (non-Spec hook content in the same
 files is preserved). Skip Spec upload on push with `SKIP_SPEC_PUSH=1`, or skip
-all hooks with `git push --no-verify`. Multi-bundle monorepos: set
-`SPEC_BUNDLE_ROOT` to the bundle directory.
+all hooks with `git push --no-verify`. Existing multi-bundle monorepos can set
+`SPEC_BUNDLE_ROOT` to select a legacy nested bundle, but new initialization is
+one canonical Spec root per Git worktree.
 
 On first push to your own handle, `spec push` creates the Cloud bundle if it
 does not exist yet (the server may suffix the slug — `my-app-2`, etc. — and

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 from click.testing import CliRunner
 
 from spec_cli.cli import cli
@@ -58,6 +60,7 @@ def test_initial_init_appends_coordination_to_existing_agents_without_overwritin
     monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
     root = tmp_path / "repo"
     root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
     agents = root / "AGENTS.md"
     agents.write_text("# Team instructions\n\nKeep this text.\n", encoding="utf-8")
     monkeypatch.chdir(root)
@@ -69,3 +72,32 @@ def test_initial_init_appends_coordination_to_existing_agents_without_overwritin
     assert "Keep this text." in body
     assert body.count(AGENTS_COORDINATION_BLOCK_BEGIN) == 1
     assert "appended Spec coordination block" in result.output
+
+
+def test_initial_init_refuses_non_git_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+    root = tmp_path / "plain-folder"
+    root.mkdir()
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(cli, ["init"], catch_exceptions=False)
+
+    assert result.exit_code != 0
+    assert "only initialize a Git repository" in result.output
+    assert not (root / "spec.yaml").exists()
+
+
+def test_initial_init_from_subdirectory_uses_git_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+    root = tmp_path / "repo"
+    child = root / "packages" / "mobile"
+    child.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    monkeypatch.chdir(child)
+
+    result = CliRunner().invoke(cli, ["init"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert "Using Git repository root:" in result.output
+    assert (root / "spec.yaml").is_file()
+    assert not (child / "spec.yaml").exists()

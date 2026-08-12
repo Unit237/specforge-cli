@@ -14,6 +14,7 @@ from spec_cli.realtime.tracker import (
     CURSOR_DIRNAME,
     CURSOR_FILENAME,
     SCHEMA_VERSION,
+    PRODUCER_BASELINE_VERSION,
     LiveCursor,
 )
 
@@ -47,6 +48,7 @@ def test_save_then_load_round_trips(tmp_path):
     cursor.record_broadcast("abc", 7)
     cursor.record_broadcast("xyz", 12)
     cursor.record_received(101)
+    cursor.mark_producer_baseline()
     cursor.save()
 
     reloaded = LiveCursor.load(tmp_path, project_id=99)
@@ -54,6 +56,7 @@ def test_save_then_load_round_trips(tmp_path):
     assert reloaded.last_received_id == 101
     assert reloaded.turns_broadcast_for("abc") == 7
     assert reloaded.turns_broadcast_for("xyz") == 12
+    assert reloaded.producer_baseline_version == PRODUCER_BASELINE_VERSION
 
 
 def test_save_writes_under_dot_spec(tmp_path):
