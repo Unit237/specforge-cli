@@ -27,7 +27,7 @@ from ..config import (
     load_credentials,
     load_manifest,
 )
-from ..preferences import Preferences, load_preferences
+from ..preferences import Preferences, is_transient_bundle_root, load_preferences
 from ..realtime import WatcherStartError, is_running, start_in_background, stop_daemon
 from ..realtime.active_edits import ActiveEditsStore
 from ..ui import console, dim, ok, warn
@@ -60,12 +60,16 @@ def _known_bundle_roots(
         if workspace.is_dir():
             current_roots.extend(discover_bundle_roots_under_cwd(workspace))
     for current in current_roots:
+        if is_transient_bundle_root(current):
+            continue
         if str(current) not in values:
             values.append(str(current))
 
     roots: list[Path] = []
     stale = 0
     for value in values:
+        if is_transient_bundle_root(value):
+            continue
         root = Path(value).expanduser().resolve()
         if not (root / "spec.yaml").is_file():
             stale += 1
