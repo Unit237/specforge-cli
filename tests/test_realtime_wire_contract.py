@@ -1,6 +1,6 @@
 """Client-side normalization for the Spec Live wire contract."""
 
-from spec_cli.realtime.events import OutgoingEvent, ToolCallPayload
+from spec_cli.realtime.events import IncomingEvent, OutgoingEvent, ToolCallPayload
 
 
 def test_outgoing_event_clips_untrusted_adapter_metadata() -> None:
@@ -37,3 +37,20 @@ def test_outgoing_event_clips_untrusted_adapter_metadata() -> None:
     assert len(payload["tool_calls"]) == 256
     assert len(payload["tool_calls"][0]["name"]) == 64
     assert len(payload["tool_calls"][0]["status"]) == 32
+
+
+def test_incoming_workspace_event_accepts_null_project_id() -> None:
+    event = IncomingEvent.from_json(
+        {
+            "id": 41,
+            "project_id": None,
+            "session_id": "workspace-session",
+            "source": "codex",
+            "role": "user",
+            "bundle_label": "workspace",
+            "author": {"user_id": 7, "name": "Maya"},
+        }
+    )
+
+    assert event.project_id == 0
+    assert event.bundle_label == "workspace"
