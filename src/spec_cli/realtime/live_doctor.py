@@ -7,7 +7,6 @@ broadcast successfully for a while (see ``QUIET_PROMPT_POST_SECS``).
 
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +15,7 @@ from typing import Literal
 from ..config import find_bundle_root, load_manifest
 from ..preferences import load_preferences
 from ..stage import historical_bundle_paths
-from .daemon import is_pid_alive, is_running, read_pid_file, watch_log_path
+from .daemon import is_running, read_pid_file, watch_log_path
 from .tracker import CURSOR_FILENAME
 
 # Warn when the watch log has not been written for this long while the
@@ -44,6 +43,7 @@ def diagnose_live_health(
     bundle_root: Path,
     *,
     expect_broadcasting: bool = True,
+    watcher_running_here: bool = False,
     log_stale_secs: float = DEFAULT_LOG_STALE_SECS,
     now: float | None = None,
 ) -> list[LiveDoctorFinding]:
@@ -74,7 +74,7 @@ def diagnose_live_health(
     record = is_running(root)
     pid_record = read_pid_file(root)
 
-    if expect_broadcasting and record is None:
+    if expect_broadcasting and record is None and not watcher_running_here:
         findings.append(
             LiveDoctorFinding(
                 code="daemon_not_running",
@@ -227,12 +227,17 @@ def emit_live_doctor_warnings(
     bundle_root: Path,
     *,
     expect_broadcasting: bool = True,
+    watcher_running_here: bool = False,
 ) -> int:
     """Log warn/dim lines for non-info findings. Returns warning count."""
     from ..ui import dim, warn
 
     count = 0
-    for f in diagnose_live_health(bundle_root, expect_broadcasting=expect_broadcasting):
+    for f in diagnose_live_health(
+        bundle_root,
+        expect_broadcasting=expect_broadcasting,
+        watcher_running_here=watcher_running_here,
+    ):
         if f.severity == "info":
             continue
         count += 1

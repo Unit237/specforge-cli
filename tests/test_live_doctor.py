@@ -6,10 +6,21 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 
+from spec_cli.preferences import Preferences
 from spec_cli.realtime.daemon import write_pid_file, watch_log_path
 from spec_cli.realtime.live_doctor import diagnose_live_health
+
+
+@pytest.fixture(autouse=True)
+def _unmuted_preferences(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Doctor tests must not inherit the developer machine's mute switch."""
+    monkeypatch.setattr(
+        "spec_cli.realtime.live_doctor.load_preferences",
+        lambda: Preferences(),
+    )
 
 
 def _bundle(tmp_path: Path, name: str = "b") -> Path:
@@ -63,7 +74,7 @@ def test_doctor_stray_live_state(tmp_path: Path) -> None:
 
 
 def test_doctor_stale_log(tmp_path: Path, monkeypatch) -> None:
-    from spec_cli.realtime.daemon import WatcherPidRecord, read_pid_file
+    from spec_cli.realtime.daemon import read_pid_file
 
     bundle = _bundle(tmp_path, "real")
     log = watch_log_path(bundle)
@@ -84,3 +95,22 @@ def test_doctor_stale_log(tmp_path: Path, monkeypatch) -> None:
 
     codes = {f.code for f in diagnose_live_health(bundle, now=time.time())}
     assert "log_stale" in codes
+
+
+def test_foreground_watcher_does_not_report_missing_daemon(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path, "foreground")
+
+    ordinary = {
+        f.code for f in diagnose_live_health(bundle, now=time.time())
+    }
+    foreground = {
+        f.code
+        for f in diagnose_live_health(
+            bundle,
+            now=time.time(),
+            watcher_running_here=True,
+        )
+    }
+
+    assert "daemon_not_running" in ordinary
+    assert "daemon_not_running" not in foreground
