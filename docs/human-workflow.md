@@ -17,6 +17,8 @@ Discovery stores workspace roots separately from bundle roots. Running it from
 an explicit ROOT remembers that workspace; running it without ROOT later scans
 all saved workspaces from any directory. Existing Spec repositories are
 registered even when no initialization is needed.
+Disposable `.codex-worktrees/` task branches are excluded; the stable checkout
+remains the machine-wide watcher target.
 
 `spec on` may write the server-minted immutable `cloud.bundle_id` and canonical
 `owner/slug` to `spec.yaml`, then refreshes managed Codex/Claude/Cursor rules and

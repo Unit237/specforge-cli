@@ -55,6 +55,20 @@ def test_remember_bundle_is_idempotent(tmp_path, monkeypatch):
     assert load_preferences().bundles == [str(root.resolve())]
 
 
+def test_preferences_ignore_disposable_codex_worktrees(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPEC_HOME", str(tmp_path / "spec-home"))
+    stable = _named_bundle(tmp_path, "stable")
+    transient_parent = tmp_path / ".codex-worktrees"
+    transient_parent.mkdir()
+    transient = _named_bundle(transient_parent, "task-123")
+    Preferences(bundles=[str(transient), str(stable)]).save()
+
+    assert load_preferences().bundles == [str(stable)]
+
+    remember_bundle(transient)
+    assert load_preferences().bundles == [str(stable)]
+
+
 def test_remember_bundle_fails_open_when_preferences_directory_is_read_only(
     tmp_path,
     monkeypatch,
