@@ -80,11 +80,11 @@ def _resolve_watch_project(
     help="Broadcast only — do not display teammates' incoming prompts.",
 )
 @click.option(
-    "--no-bootstrap",
-    is_flag=True,
+    "--bootstrap/--no-bootstrap",
+    default=False,
     help=(
-        "Do not print recent Cloud history on connect — only new SSE "
-        "events (and any gap replay since your last run)."
+        "Replay recent Cloud history before joining the live stream. "
+        "Off by default: a normal `spec watch` starts at the moment you join."
     ),
 )
 @click.option(
@@ -179,7 +179,7 @@ def _resolve_watch_project(
 def watch_cmd(
     no_broadcast: bool,
     no_receive: bool,
-    no_bootstrap: bool,
+    bootstrap: bool,
     mirror: bool,
     verbose_out: bool,
     compact: bool,
@@ -201,6 +201,9 @@ def watch_cmd(
     Rows carry their chat title. ``USER`` marks a human prompt, ``UPDATE``
     marks Codex progress commentary, and ``ANSWER`` marks its human-facing
     conclusion. Internal reasoning and transport frames are not rendered.
+
+    The receiver starts at the moment you join. Pass ``--bootstrap`` only
+    when you explicitly want recent Cloud history before the live tail.
 
     Broadcasting follows ``cloud.prompt_stream`` in spec.yaml (default ON).
     Use ``spec live off`` / ``spec live mute`` to opt out. Receiving teammate
@@ -416,7 +419,7 @@ def watch_cmd(
             poll_interval=poll_interval if poll_interval and poll_interval > 0 else 2.0,
             broadcast=broadcast_active,
             receive=not no_receive,
-            bootstrap_receive=not no_bootstrap and not no_receive,
+            bootstrap_receive=bootstrap and not no_receive,
             persist_cursor=foreground_daemon is None,
             mirror=mirror,
             # Presence shares the same gates as prompt broadcasting so a

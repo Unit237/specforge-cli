@@ -104,9 +104,9 @@ DEFAULT_TEAM_PRESENCE_TICK_SECS = 30.0
 # against a kill -9 / power loss costing more than a few seconds of
 # replays.
 CURSOR_SAVE_INTERVAL_SECS = 10.0
-# Recent Cloud rows printed once on connect so ``spec watch`` is not
-# live-only. SSE ``Last-Event-ID`` replay only covers the gap since the
-# last run; this REST warm-up supplies context when you are already caught up.
+# Recent Cloud rows printed only when ``spec watch --bootstrap`` is requested.
+# A normal join is live-only and does not seed the SSE connection from a
+# persisted consumer cursor.
 WATCH_BOOTSTRAP_LIMIT_DEFAULT = 80
 # Hard cap on per-event text payload before redaction. The server caps
 # at 512 KB; we cap a hair below to avoid edge-of-frame rejections,
@@ -283,9 +283,10 @@ class WatcherOptions:
     # by default so the pane shows prose narration only.
     show_tool_runs: bool = False
     project_branch_filter: str | None = None
-    # When True (default), fetch the latest visible workspace prompt rows over
-    # REST before opening the SSE tail so the pane shows recent activity.
-    bootstrap_receive: bool = True
+    # Opt-in history mode: fetch recent workspace rows and resume from the
+    # persisted receive cursor before opening the SSE tail. A normal join
+    # starts at the current stream position.
+    bootstrap_receive: bool = False
     # A foreground workspace viewer may overlap a background broadcaster for
     # this bundle. In that case the daemon exclusively owns the shared cursor
     # file and the viewer keeps its receive position in memory only.
@@ -623,8 +624,6 @@ def run_watcher(
             verbose=opts.verbose_assistant,
             user_agent=opts.user_agent,
         )
-        consumer.set_resume_cursor(cursor.last_received_id)
-
         _live_ev_dedup = LivePromptEventDeduper()
         # SSE reader thread only enqueues — the main loop drains and
         # renders. Blocking Rich I/O on the reader used to stall
