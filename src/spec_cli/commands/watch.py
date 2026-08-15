@@ -451,6 +451,7 @@ def watch_cmd(
             broadcast=broadcast_active,
             prompt_scope=prompt_scope,
             receive=not no_receive,
+            render_received=not background_runner,
             bootstrap_receive=bootstrap and not no_receive,
             persist_cursor=foreground_daemon is None,
             mirror=mirror,

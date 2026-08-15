@@ -8,14 +8,9 @@ collapsing — and the opt-in alert path. The alert tests stub out
 """
 from __future__ import annotations
 
-import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from collections import deque
-from io import StringIO
-from unittest.mock import MagicMock
-
-import pytest
 from rich.console import Console
 from rich.theme import Theme
 
@@ -728,6 +723,29 @@ def test_assistant_shows_pending_user_prompt_line(monkeypatch):
     out = cap.export_text()
     assert "Where is the hero section" in out
     assert "⤷ prompt" in out
+
+
+def test_live_watch_can_disable_duplicate_prompt_echo(monkeypatch):
+    import spec_cli.realtime.notifier as notifier_mod
+
+    cap = _recording_console()
+    monkeypatch.setattr(notifier_mod, "console", cap)
+    user = _ev(role="user", text="A very large prompt should print once")
+    assistant = _ev(role="assistant", text="Immediate progress update")
+    assistant.id = user.id + 1
+    assistant.session_id = user.session_id
+
+    notifier = Notifier(
+        critic_enabled=False,
+        echo_prompt_context=False,
+    )
+    notifier.show(user)
+    notifier.show(assistant)
+
+    output = cap.export_text()
+    assert output.count("A very large prompt should print once") == 1
+    assert "Immediate progress update" in output
+    assert "⤷ prompt" not in output
 
 
 def test_second_assistant_does_not_repeat_stale_prompt(monkeypatch):

@@ -68,6 +68,11 @@ WATCH_LOG_FILENAME = "watch.log"
 WATCH_DIR = ".spec"
 WATCH_PID_SCHEMA_VERSION = 1
 
+# Background daemons are service processes, not transcript archives. Preserve
+# enough tail for diagnosis while bounding aggregate disk across many bundles.
+WATCH_LOG_MAX_BYTES = 2 * 1024 * 1024
+WATCH_LOG_RETAIN_BYTES = 512 * 1024
+
 # How long ``stop()`` will wait for SIGTERM to land before escalating
 # to SIGKILL. Generous enough that the watcher's finally-block (final
 # clean-state broadcast, cursor save, consumer thread join) gets a
@@ -127,6 +132,35 @@ def watch_pid_path(bundle_root: Path) -> Path:
 
 def watch_log_path(bundle_root: Path) -> Path:
     return watch_dir(bundle_root) / WATCH_LOG_FILENAME
+
+
+def _compact_watch_log(path: Path) -> None:
+    """Keep only the recent tail when a daemon log crossed its budget."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size <= WATCH_LOG_MAX_BYTES:
+        return
+
+    temp = path.with_name(f".{path.name}.compact-{os.getpid()}")
+    try:
+        with path.open("rb") as stream:
+            stream.seek(max(0, size - WATCH_LOG_RETAIN_BYTES))
+            tail = stream.read(WATCH_LOG_RETAIN_BYTES)
+        # Starting at an arbitrary byte may split a UTF-8 sequence or a Rich
+        # line. Drop that partial first line; the diagnostic tail stays valid.
+        if size > WATCH_LOG_RETAIN_BYTES and b"\n" in tail:
+            tail = tail.split(b"\n", 1)[1]
+        temp.write_bytes(tail)
+        temp.chmod(0o644)
+        os.replace(temp, path)
+    except OSError as exc:
+        log.debug("spec-live: watch log compaction skipped for %s: %s", path, exc)
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def write_pid_file(bundle_root: Path, *, pid: int, log_path: Path) -> Path:
@@ -335,9 +369,8 @@ def start_in_background(
 
     log_path = watch_log_path(bundle_root)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    # Open append-mode so successive starts share one log file the
-    # user can ``tail -f``. We let it grow unbounded for now; rotation
-    # is a v0.3 concern.
+    _compact_watch_log(log_path)
+    # Open append-mode so successive starts share one bounded diagnostic tail.
     log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
 
     cmd = list(spec_executable) if spec_executable is not None else _spec_exec_argv()
