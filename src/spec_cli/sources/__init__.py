@@ -10,11 +10,12 @@ Four adapters today:
   - ``compress``    — reads Compress terminal-agent session checkpoints.
 
 All adapters expose a ``read_*_sessions(bundle_paths, *, since,
-verbose)`` entry point. ``bundle_paths`` may be a single ``Path`` or
-an iterable of paths (current root + historical aliases — see
-``stage.historical_bundle_paths`` for Fix #2). Each adapter handles
-its own client's idiosyncratic on-disk format; the rest of the CLI
-treats a ``Session`` as a Session regardless of source.
+verbose)`` entry point. ``bundle_paths`` may be a single ``Path``, an
+iterable of paths (current root + historical aliases — see
+``stage.historical_bundle_paths`` for Fix #2), or ``None`` for the one
+machine-wide live broadcaster elected by ``spec on``. Each adapter
+handles its own client's idiosyncratic on-disk format; the rest of the
+CLI treats a ``Session`` as a Session regardless of source.
 """
 
 from .claude_code import (

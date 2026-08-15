@@ -10,7 +10,12 @@ from spec_cli.api import ApiError
 from spec_cli.cli import cli
 from spec_cli.commands.workday import _cloud_login_error, _known_bundle_roots
 from spec_cli.config import Credentials
-from spec_cli.preferences import Preferences, load_preferences, remember_bundle
+from spec_cli.preferences import (
+    Preferences,
+    load_preferences,
+    machine_broadcast_role,
+    remember_bundle,
+)
 from spec_cli.realtime import StartOutcome, StopOutcome
 from spec_cli.realtime.active_edits import ActiveEditsStore
 
@@ -175,6 +180,8 @@ def test_spec_on_from_workspace_registers_all_peer_bundles(tmp_path, monkeypatch
     assert result.exit_code == 0, result.output
     assert started == [first.resolve(), second.resolve()]
     assert load_preferences().bundles == [str(first.resolve()), str(second.resolve())]
+    assert machine_broadcast_role(first) == "owner"
+    assert machine_broadcast_role(second) == "member"
 
 
 def test_spec_on_connects_and_starts_fresh_example(tmp_path, monkeypatch):

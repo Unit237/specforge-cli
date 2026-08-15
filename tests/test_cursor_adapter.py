@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
+from spec_cli.prompts.schema import MAX_TURN_TEXT_CHARS
 from spec_cli.sources.cursor import (
     cursor_global_storage_db,
     cursor_workspace_storage_root,
@@ -430,6 +432,66 @@ def test_read_cursor_sessions_ignores_workspaces_outside_bundle(tmp_path, monkey
 
     sessions = list(read_cursor_sessions(bundle))
     assert [s.id for s in sessions] == [bundle_composer]
+
+    machine_sessions = list(read_cursor_sessions(None))
+    assert {s.id for s in machine_sessions} == {
+        bundle_composer,
+        other_composer,
+    }
+
+
+def test_machine_scan_filters_dormant_composers_before_loading_bubbles(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path))
+    workspace = tmp_path / "old-workspace"
+    workspace.mkdir()
+    composer_id = "cccccccc-cccc-4ccc-accc-cccccccccccc"
+    _make_workspace(tmp_path, "old", workspace, [composer_id])
+    _add_composer(
+        tmp_path,
+        composer_id,
+        bubbles=[{"id": "u1", "type": 1, "text": "dormant"}],
+    )
+    monkeypatch.setattr(
+        "spec_cli.sources.cursor._build_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dormant composer should not be parsed")
+        ),
+    )
+
+    sessions = list(
+        read_cursor_sessions(
+            None,
+            since=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+
+    assert sessions == []
+
+
+def test_cursor_user_prompt_is_bounded_to_schema_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    composer_id = "dddddddd-dddd-4ddd-addd-dddddddddddd"
+    _make_workspace(tmp_path, "large", workspace, [composer_id])
+    _add_composer(
+        tmp_path,
+        composer_id,
+        bubbles=[
+            {
+                "id": "u1",
+                "type": 1,
+                "text": "x" * (MAX_TURN_TEXT_CHARS + 100),
+            }
+        ],
+    )
+
+    session = list(read_cursor_sessions(None, verbose=True))[0]
+
+    assert len(session.turns[0].text) <= MAX_TURN_TEXT_CHARS
+    assert session.turns[0].text.endswith("[…truncated…]")
 
 
 def test_read_cursor_sessions_includes_subworkspaces(tmp_path, monkeypatch):

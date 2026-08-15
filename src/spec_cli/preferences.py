@@ -230,6 +230,51 @@ class Preferences:
         return path
 
 
+def _machine_broadcast_roots(prefs: Preferences) -> list[Path]:
+    roots: list[Path] = []
+    for raw in prefs.bundles:
+        if is_transient_bundle_root(raw):
+            continue
+        try:
+            root = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        if (root / "spec.yaml").is_file() and root not in roots:
+            roots.append(root)
+    return sorted(roots, key=lambda root: str(root).casefold())
+
+
+def machine_broadcast_owner(prefs: Preferences | None = None) -> Path | None:
+    """Return the one registered watcher that owns machine-wide prompts.
+
+    ``spec on`` starts one watcher per registered bundle, but local agent
+    stores are machine-wide. Electing one stable owner lets that watcher scan
+    every conversation exactly once while the remaining watchers keep their
+    repository presence duties. The machine mute/autostart pair is the
+    authoritative workday switch; outside that state there is no owner and a
+    directly-invoked watcher keeps its legacy per-project behavior.
+    """
+    current = prefs or load_preferences()
+    if current.prompt_stream_muted or current.autostart_disabled:
+        return None
+    roots = _machine_broadcast_roots(current)
+    return roots[0] if roots else None
+
+
+def machine_broadcast_role(
+    bundle_root: Path, prefs: Preferences | None = None
+) -> str | None:
+    """Return ``owner`` / ``member`` for an active ``spec on`` registry."""
+    current = prefs or load_preferences()
+    if current.prompt_stream_muted or current.autostart_disabled:
+        return None
+    roots = _machine_broadcast_roots(current)
+    root = bundle_root.expanduser().resolve()
+    if not roots or root not in roots:
+        return None
+    return "owner" if root == roots[0] else "member"
+
+
 def load_preferences() -> Preferences:
     """Module-level convenience — used by ``spec watch`` and the
     ``spec live`` command group so a single import covers the whole
@@ -269,6 +314,8 @@ __all__ = [
     "Preferences",
     "is_transient_bundle_root",
     "load_preferences",
+    "machine_broadcast_owner",
+    "machine_broadcast_role",
     "remember_bundle",
     "remember_discovery_root",
 ]

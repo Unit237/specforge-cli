@@ -157,7 +157,7 @@ class _WorkspaceMatch:
 
 
 def _workspace_dir_candidates(
-    bundle_paths: Iterable[Path],
+    bundle_paths: Iterable[Path] | None,
 ) -> list[_WorkspaceMatch]:
     """Every Cursor workspaceStorage entry whose folder intersects the bundle.
 
@@ -184,8 +184,10 @@ def _workspace_dir_candidates(
     if not storage_root.is_dir():
         return []
 
-    resolved_roots = [p.resolve() for p in bundle_paths]
-    if not resolved_roots:
+    resolved_roots = (
+        None if bundle_paths is None else [p.resolve() for p in bundle_paths]
+    )
+    if resolved_roots == []:
         return []
 
     matches: list[_WorkspaceMatch] = []
@@ -222,8 +224,8 @@ def _workspace_dir_candidates(
         #     metadata, so it has to read as "this conversation is
         #     about <bundle>", not "this conversation lived in some
         #     parent monorepo".
-        anchor: Path | None = None
-        for r in resolved_roots:
+        anchor: Path | None = resolved_folder if resolved_roots is None else None
+        for r in resolved_roots or []:
             if resolved_folder == r or r in resolved_folder.parents:
                 anchor = resolved_folder
                 break
@@ -282,21 +284,16 @@ def _read_item_table(db_path: Path, key: str) -> Any | None:
         return None
 
 
-def _read_disk_kv(db_path: Path, key: str) -> Any | None:
-    """Return ``json.loads(value)`` for a row in ``cursorDiskKV``, or ``None``."""
-    try:
-        uri = f"file:{db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
-    except sqlite3.Error:
-        return None
+def _read_disk_kv_from_connection(
+    conn: sqlite3.Connection, key: str
+) -> Any | None:
+    """Read one decoded ``cursorDiskKV`` value from an existing connection."""
     try:
         row = conn.execute(
             "SELECT value FROM cursorDiskKV WHERE key = ?", (key,)
         ).fetchone()
     except sqlite3.Error:
         return None
-    finally:
-        conn.close()
     if not row:
         return None
     raw = row[0]
@@ -311,6 +308,19 @@ def _read_disk_kv(db_path: Path, key: str) -> Any | None:
         return json.loads(raw)
     except json.JSONDecodeError:
         return None
+
+
+def _read_disk_kv(db_path: Path, key: str) -> Any | None:
+    """Return ``json.loads(value)`` for a row in ``cursorDiskKV``, or ``None``."""
+    try:
+        uri = f"file:{db_path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return None
+    try:
+        return _read_disk_kv_from_connection(conn, key)
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -482,12 +492,14 @@ def _preview(text: str) -> str:
         return stripped
     # Try to break at a paragraph or newline boundary so the preview
     # ends at a natural reading point, not mid-sentence.
-    cut = stripped.rfind("\n\n", 0, MAX_TURN_TEXT_CHARS)
-    if cut < MAX_TURN_TEXT_CHARS // 2:
-        cut = stripped.rfind("\n", 0, MAX_TURN_TEXT_CHARS)
-    if cut < MAX_TURN_TEXT_CHARS // 2:
-        cut = MAX_TURN_TEXT_CHARS
-    return stripped[:cut].rstrip() + "\n\n[…truncated…]"
+    marker = "\n\n[…truncated…]"
+    limit = MAX_TURN_TEXT_CHARS - len(marker)
+    cut = stripped.rfind("\n\n", 0, limit)
+    if cut < limit // 2:
+        cut = stripped.rfind("\n", 0, limit)
+    if cut < limit // 2:
+        cut = limit
+    return stripped[:cut].rstrip() + marker
 
 
 def _parse_bubble_timestamp(raw: Any) -> datetime | None:
@@ -651,7 +663,7 @@ def _build_session(
     composer_data: dict[str, Any],
     workspace_folder: Path,
     *,
-    global_db: Path,
+    global_conn: sqlite3.Connection,
     verbose: bool,
 ) -> Session | None:
     """Stitch one Cursor composer into a Session, coalescing the many
@@ -770,7 +782,9 @@ def _build_session(
         bubble_id = header.get("bubbleId")
         if not isinstance(bubble_id, str) or not bubble_id:
             continue
-        bubble = _read_disk_kv(global_db, f"bubbleId:{composer_id}:{bubble_id}")
+        bubble = _read_disk_kv_from_connection(
+            global_conn, f"bubbleId:{composer_id}:{bubble_id}"
+        )
         if not isinstance(bubble, dict):
             continue
         btype = bubble.get("type") if isinstance(bubble.get("type"), int) else None
@@ -787,7 +801,7 @@ def _build_session(
                     text = "(prompt body not extractable — see Cursor)"
                 else:
                     continue
-            builder.turns.append(Turn(role="user", text=text, at=at))
+            builder.turns.append(Turn(role="user", text=_preview(text), at=at))
             continue
 
         if btype != _BUBBLE_TYPE_ASSISTANT:
@@ -852,13 +866,97 @@ def _build_session(
 # ---------------------------------------------------------------------------
 
 
+def _iter_composer_sessions(
+    matches: Iterable[_WorkspaceMatch],
+    *,
+    global_db: Path,
+    since: datetime | None,
+    verbose: bool,
+    yielded: set[str],
+) -> Iterable[Session]:
+    """Read matched Composer sessions through one SQLite connection.
+
+    A machine-wide scan can touch thousands of bubbles. Reopening the global
+    database for every bubble made a single poll take over a minute; one
+    read-only connection keeps the same query/parser boundary without the
+    connection churn.
+    """
+    try:
+        uri = f"file:{global_db}?mode=ro"
+        global_conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return  # type: ignore[return-value]
+    try:
+        for match in matches:
+            workspace_db = match.storage_dir / "state.vscdb"
+            if not workspace_db.is_file():
+                continue
+
+            composer_index = _read_item_table(workspace_db, "composer.composerData")
+            if not isinstance(composer_index, dict):
+                continue
+
+            all_composers = composer_index.get("allComposers")
+            if not isinstance(all_composers, list):
+                continue
+
+            # Composer order is stable: oldest first by ``createdAt``. Sort
+            # explicitly so output is deterministic across runs and machines.
+            composer_entries: list[tuple[int, str]] = []
+            for entry in all_composers:
+                if not isinstance(entry, dict):
+                    continue
+                cid = entry.get("composerId")
+                if not isinstance(cid, str) or not cid:
+                    continue
+                activity = entry.get("lastUpdatedAt") or entry.get("createdAt")
+                activity_at = _parse_bubble_timestamp(activity)
+                if since is not None and activity_at is not None:
+                    if activity_at < since:
+                        continue
+                ts = activity if isinstance(activity, (int, float)) else 0
+                composer_entries.append((int(ts), cid))
+            composer_entries.sort()
+
+            for _, composer_id in composer_entries:
+                if composer_id in yielded:
+                    continue
+                data = _read_disk_kv_from_connection(
+                    global_conn, f"composerData:{composer_id}"
+                )
+                if not isinstance(data, dict):
+                    continue
+                try:
+                    session = _build_session(
+                        composer_id,
+                        data,
+                        workspace_folder=match.workspace_folder,
+                        global_conn=global_conn,
+                        verbose=verbose,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    raise CursorError(
+                        f"composer {composer_id}: could not build session — {e}"
+                    ) from e
+                if session is None:
+                    continue
+                activity_at = session.ended_at or session.started_at
+                if since is not None and activity_at is not None:
+                    if activity_at < since:
+                        continue
+                yielded.add(composer_id)
+                yield session
+    finally:
+        global_conn.close()
+
+
 def read_cursor_sessions(
-    bundle_paths: Path | Iterable[Path],
+    bundle_paths: Path | Iterable[Path] | None,
     *,
     since: datetime | None = None,
     verbose: bool = False,
 ) -> Iterable[Session]:
-    """Yield every Cursor Composer session captured for the given bundle.
+    """Yield Cursor sessions for a bundle, or every session when scope is ``None``.
 
     Accepts either a single bundle root or an iterable of roots —
     current location plus every historical path the bundle has lived
@@ -877,16 +975,18 @@ def read_cursor_sessions(
     so unlike the Claude Code adapter we don't need a cwd cross-check
     on every bubble.
 
-    ``since`` filters by composer ``createdAt``. Composers with the
+    ``since`` filters by the composer's latest activity. Composers with the
     same id across multiple workspaces (rare — would require manual
     UUID re-use) are de-duplicated within a single read.
     """
-    roots: list[Path] = (
-        [bundle_paths]
+    roots: list[Path] | None = (
+        None
+        if bundle_paths is None
+        else [bundle_paths]
         if isinstance(bundle_paths, Path)
         else list(bundle_paths)
     )
-    if not roots:
+    if roots == []:
         return  # type: ignore[return-value]
 
     yielded: set[str] = set()
@@ -912,55 +1012,10 @@ def read_cursor_sessions(
         # may still have been yielded above.
         return  # type: ignore[return-value]
 
-    for match in matches:
-        workspace_db = match.storage_dir / "state.vscdb"
-        if not workspace_db.is_file():
-            continue
-
-        composer_index = _read_item_table(workspace_db, "composer.composerData")
-        if not isinstance(composer_index, dict):
-            continue
-
-        all_composers = composer_index.get("allComposers")
-        if not isinstance(all_composers, list):
-            continue
-
-        # Composer order is stable: oldest first by ``createdAt``. Sort
-        # explicitly so output is deterministic across runs and machines.
-        composer_entries: list[tuple[int, str]] = []
-        for entry in all_composers:
-            if not isinstance(entry, dict):
-                continue
-            cid = entry.get("composerId")
-            if not isinstance(cid, str) or not cid:
-                continue
-            created = entry.get("createdAt")
-            ts = created if isinstance(created, (int, float)) else 0
-            composer_entries.append((int(ts), cid))
-        composer_entries.sort()
-
-        for _, composer_id in composer_entries:
-            if composer_id in yielded:
-                continue
-            data = _read_disk_kv(global_db, f"composerData:{composer_id}")
-            if not isinstance(data, dict):
-                continue
-            try:
-                session = _build_session(
-                    composer_id,
-                    data,
-                    workspace_folder=match.workspace_folder,
-                    global_db=global_db,
-                    verbose=verbose,
-                )
-            except Exception as e:  # noqa: BLE001
-                raise CursorError(
-                    f"composer {composer_id}: could not build session — {e}"
-                ) from e
-            if session is None:
-                continue
-            if since is not None and session.started_at is not None:
-                if session.started_at < since:
-                    continue
-            yielded.add(composer_id)
-            yield session
+    yield from _iter_composer_sessions(
+        matches,
+        global_db=global_db,
+        since=since,
+        verbose=verbose,
+        yielded=yielded,
+    )

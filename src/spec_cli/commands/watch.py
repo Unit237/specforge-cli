@@ -27,7 +27,12 @@ from ..config import (
     load_manifest,
     parse_cloud_project,
 )
-from ..preferences import load_preferences, remember_bundle
+from ..preferences import (
+    load_preferences,
+    machine_broadcast_owner,
+    machine_broadcast_role,
+    remember_bundle,
+)
 from ..realtime import (
     WatcherOptions,
     WatcherStartError,
@@ -205,10 +210,12 @@ def watch_cmd(
     The receiver starts at the moment you join. Pass ``--bootstrap`` only
     when you explicitly want recent Cloud history before the live tail.
 
-    Broadcasting follows ``cloud.prompt_stream`` in spec.yaml (default ON).
-    Use ``spec live off`` / ``spec live mute`` to opt out. Receiving teammate
-    events is always available under the Cloud workspace visibility rule. Use `--mirror`
-    to also drop incoming peer events into a local file you can grep.
+    While ``spec on`` is active, one registered watcher broadcasts every
+    supported agent conversation on this machine, including chats outside a
+    Spec repository. Use ``spec off`` / ``spec live mute`` to opt out.
+    Receiving teammate events is always available under the Cloud workspace
+    visibility rule. Use `--mirror` to also drop incoming peer events into a
+    local file you can grep.
 
     By default this runs in the foreground; pass `--background` to
     detach into a background daemon you can manage with `spec live
@@ -357,36 +364,60 @@ def watch_cmd(
         except ApiError as e:
             warn(f"could not read /api/auth/me ({e}) — echo suppression off")
 
-        # Broadcasting resolution. Default is ON; two opt-out layers:
+        # Broadcasting resolution. ``spec on`` elects exactly one registered
+        # watcher to scan every local agent store into the workspace stream.
+        # The remaining watchers retain repository presence only. Outside the
+        # machine registry, preserve the legacy per-project policy.
+        # Opt-out layers:
         #   * --no-broadcast on the command line (this run only)
         #   * the bundle manifest can disable for the whole team
         #     (`spec live off` writes ``cloud.prompt_stream: disabled``)
         #   * the user can mute on this machine for every bundle
         #     (`spec live mute` writes ``~/.spec/preferences.json``)
-        # All three are independent kill-switches; ANY of them off → no broadcast.
         prefs = load_preferences()
         broadcast_requested = not no_broadcast
         project_opted_in = manifest.prompt_stream_enabled
         user_muted = prefs.prompt_stream_muted
-        broadcast_active = (
+        can_broadcast = (
             broadcast_requested
-            and project_opted_in
             and not user_muted
             and foreground_daemon is None
         )
+        machine_role = machine_broadcast_role(root, prefs)
+        if machine_role == "member":
+            owner = machine_broadcast_owner(prefs)
+            if owner is None or is_running(owner) is None:
+                # ``spec on`` starts the deterministic owner first. A lone
+                # manual watcher must not go silent merely because an old
+                # registry entry exists while that owner is stopped.
+                machine_role = None
+        if machine_role == "owner" and can_broadcast:
+            prompt_scope = "machine"
+        elif machine_role == "member":
+            prompt_scope = "none"
+        elif can_broadcast and project_opted_in:
+            prompt_scope = "project"
+        else:
+            prompt_scope = "none"
+        presence_active = can_broadcast and project_opted_in
+        broadcast_active = prompt_scope != "none" or presence_active
 
         if (
             foreground_daemon is not None
             and broadcast_requested
-            and project_opted_in
             and not user_muted
+            and (project_opted_in or machine_role is not None)
         ):
             info(
                 f"background watcher pid {foreground_daemon.pid} already broadcasts "
                 f"{handle}/{slug}; this foreground pane receives the workspace "
                 "feed across all bundles without duplicating local events."
             )
-        elif broadcast_requested and not project_opted_in:
+        elif (
+            broadcast_requested
+            and not project_opted_in
+            and machine_role is None
+        ):
             warn(
                 "broadcasting is disabled for this bundle — run `spec live on` "
                 "(or set `cloud.prompt_stream: enabled` in spec.yaml) to share "
@@ -399,7 +430,7 @@ def watch_cmd(
             )
 
         branch_filter = None
-        if branch_only:
+        if branch_only and prompt_scope == "project":
             from ..git import read_git_context
 
             git = read_git_context(root)
@@ -418,6 +449,7 @@ def watch_cmd(
             self_name=self_name,
             poll_interval=poll_interval if poll_interval and poll_interval > 0 else 2.0,
             broadcast=broadcast_active,
+            prompt_scope=prompt_scope,
             receive=not no_receive,
             bootstrap_receive=bootstrap and not no_receive,
             persist_cursor=foreground_daemon is None,
@@ -426,7 +458,7 @@ def watch_cmd(
             # user who muted Spec Live doesn't unintentionally start
             # broadcasting their dirty file list. Receiving is always
             # available so the local mirror still gets populated.
-            presence_enabled=broadcast_active,
+            presence_enabled=presence_active,
             verbose_assistant=verbose_out or manifest.prompt_stream_verbose,
             compact_output=compact,
             show_tool_runs=show_tool_runs,

@@ -89,6 +89,19 @@ def test_ignores_sessions_from_another_workspace_and_malformed_files(tmp_path, m
     assert list(read_compress_sessions(bundle)) == []
 
 
+def test_machine_wide_read_includes_another_workspace(tmp_path, monkeypatch):
+    other = tmp_path / "other"
+    other.mkdir()
+    store = tmp_path / "sessions"
+    _write_session(store, cwd=other)
+    monkeypatch.setenv("COMPRESS_SESSION_DIR", str(store))
+
+    sessions = list(read_compress_sessions(None, verbose=True))
+
+    assert [session.id for session in sessions] == ["compress-1"]
+    assert sessions[0].cwd == str(other.resolve())
+
+
 @pytest.mark.parametrize("source", ["compress", "all"])
 def test_prompts_capture_includes_compress(tmp_path, monkeypatch, source):
     bundle = tmp_path / "repo"
