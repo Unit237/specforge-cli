@@ -86,6 +86,7 @@ def test_foreground_watch_reuses_background_producer(monkeypatch, tmp_path) -> N
     assert "workspace feed across all bundles" in result.output
     assert len(captured) == 1
     assert captured[0].receive is True
+    assert captured[0].render_received is True
     assert captured[0].broadcast is False
     assert captured[0].bootstrap_receive is False
     assert captured[0].persist_cursor is False

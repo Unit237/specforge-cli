@@ -404,6 +404,7 @@ class Notifier:
         assistant_live_cap: int | None = None,
         self_user_id: int | None = None,
         local_broadcast_client_id: str | None = None,
+        echo_prompt_context: bool = True,
     ) -> None:
         self._compact = compact
         self._lock = threading.Lock()
@@ -471,6 +472,11 @@ class Notifier:
         self._local_broadcast_client_id = (
             (local_broadcast_client_id or "").strip() or None
         )
+        # Historical/review panes may join after the USER row scrolled away,
+        # so they retain one short prompt echo under the first reply. A normal
+        # foreground ``spec watch`` already rendered the USER block and disables
+        # this to avoid duplicating a potentially enormous prompt.
+        self._echo_prompt_context = bool(echo_prompt_context)
         # ``/turn`` / ``/full``: while a system pager (``less``) owns the
         # screen, suppress live stream prints so output does not interleave.
         self._live_suppress = False
@@ -707,7 +713,7 @@ class Notifier:
             )
             if self._critic_enabled:
                 critiques = critique_event(event)
-            if preview:
+            if preview and self._echo_prompt_context:
                 self._pending_user_prompt[pair_key] = (author, preview)
             # Remember this prompt as "awaiting AI reply". Sessions
             # are pinned by (project_id, session_id) — the same
@@ -736,9 +742,10 @@ class Notifier:
             # still gets flagged.
             if self._critic_enabled:
                 critiques = critique_event(event)
-            pending_prompt = self._pending_user_prompt.pop(pair_key, None)
-            if pending_prompt is None:
-                pending_prompt = self._pairing_prompt_from_buffer(event)
+            if self._echo_prompt_context:
+                pending_prompt = self._pending_user_prompt.pop(pair_key, None)
+                if pending_prompt is None:
+                    pending_prompt = self._pairing_prompt_from_buffer(event)
         else:
             # Prefer full ``text`` over ``summary`` — both are usually set
             # for assistant turns, and the summary is only a headline.
@@ -771,9 +778,10 @@ class Notifier:
             # summaries surfaces in the live stream.
             if self._critic_enabled:
                 critiques = critique_event(event)
-            pending_prompt = self._pending_user_prompt.pop(pair_key, None)
-            if pending_prompt is None:
-                pending_prompt = self._pairing_prompt_from_buffer(event)
+            if self._echo_prompt_context:
+                pending_prompt = self._pending_user_prompt.pop(pair_key, None)
+                if pending_prompt is None:
+                    pending_prompt = self._pairing_prompt_from_buffer(event)
 
         with self._lock:
             if self._live_suppress:

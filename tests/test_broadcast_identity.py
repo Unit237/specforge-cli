@@ -16,7 +16,7 @@ _spec.loader.exec_module(_bi_mod)
 load_or_create_broadcast_client_id = _bi_mod.load_or_create_broadcast_client_id
 
 
-def test_stable_per_bundle_under_one_home(tmp_path: Path, monkeypatch) -> None:
+def test_stable_for_one_machine(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     bundle = tmp_path / "proj"
     bundle.mkdir()
@@ -26,7 +26,9 @@ def test_stable_per_bundle_under_one_home(tmp_path: Path, monkeypatch) -> None:
     assert len(first) >= 8
 
 
-def test_different_bundle_directories_differ(tmp_path: Path, monkeypatch) -> None:
+def test_different_bundle_directories_share_machine_id(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     a = tmp_path / "a"
     b = tmp_path / "b"
@@ -34,7 +36,7 @@ def test_different_bundle_directories_differ(tmp_path: Path, monkeypatch) -> Non
     b.mkdir()
     id_a = load_or_create_broadcast_client_id(a)
     id_b = load_or_create_broadcast_client_id(b)
-    assert id_a != id_b
+    assert id_a == id_b
 
 
 def test_same_logical_repo_path_under_different_homes_differs(

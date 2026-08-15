@@ -1,52 +1,31 @@
-"""Stable per-bundle id for Spec Live broadcast echo suppression.
+"""Stable machine id for Spec Live broadcast attribution.
 
-``spec watch`` filters SSE replays of the *local* install's POSTs. The
-id must survive process restarts so reconnect replays still classify
-correctly, and must differ across **physical machines** even when the
-same git checkout (and ``.spec/``) is synced via iCloud, Dropbox, or
-similar — a client id stored *inside* the bundle would be identical on
-every clone and incorrectly suppress the other laptop's feed.
+One ``spec on`` owner now broadcasts conversations for every repository on a
+machine. Every foreground ``spec watch`` on that machine must therefore use the
+same id; a per-bundle id mislabels the owner's events as ``other machine``.
 
-The id is therefore stored under the user's home directory
-(``~/.spec/broadcast-client-ids/``), keyed by a hash of the bundle's
-resolved path. Legacy ``.spec/live-broadcast-client-id`` in the bundle
-is no longer read or written so synced copies cannot collide.
+The id lives outside any repository at ``~/.spec/broadcast-client-id``. It
+survives process restarts and differs across physical machines because each
+machine has its own home directory. Legacy per-bundle files remain harmless and
+are intentionally not read.
 """
 from __future__ import annotations
 
-import hashlib
 import uuid
 from pathlib import Path
 
 
-def _bundle_identity_key(bundle_root: Path) -> str:
-    """Stable SHA-256 hex digest for ``bundle_root`` (resolved when possible)."""
-    root = bundle_root.expanduser()
-    try:
-        resolved = root.resolve()
-    except OSError:
-        resolved = root
-    raw = str(resolved).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+def _machine_client_id_path() -> Path:
+    return Path.home() / ".spec" / "broadcast-client-id"
 
 
-def _machine_client_id_path(bundle_root: Path) -> Path:
-    return (
-        Path.home()
-        / ".spec"
-        / "broadcast-client-ids"
-        / f"{_bundle_identity_key(bundle_root)}.txt"
-    )
+def load_or_create_broadcast_client_id(_bundle_root: Path) -> str:
+    """Return the stable UUID string for this physical machine.
 
-
-def load_or_create_broadcast_client_id(bundle_root: Path) -> str:
-    """Return a stable UUID string for this (machine, bundle directory) pair.
-
-    Persists under ``~/.spec/broadcast-client-ids/<sha256>.txt``. Creates
-    parent dirs as needed. Not tied to the repo so cloud-synced working
-    trees do not share an id across laptops.
+    ``_bundle_root`` remains in the signature for caller compatibility; machine
+    identity deliberately does not depend on it.
     """
-    path = _machine_client_id_path(bundle_root)
+    path = _machine_client_id_path()
     try:
         if path.is_file():
             raw = path.read_text(encoding="utf-8").strip()

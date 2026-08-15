@@ -125,6 +125,24 @@ exec sleep {sleep_secs}
     return script
 
 
+def test_watch_log_compaction_keeps_recent_diagnostic_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import spec_cli.realtime.daemon as daemon_mod
+
+    log_path = tmp_path / "watch.log"
+    log_path.write_bytes((b"old event\n" * 100) + b"recent event\n")
+    monkeypatch.setattr(daemon_mod, "WATCH_LOG_MAX_BYTES", 128)
+    monkeypatch.setattr(daemon_mod, "WATCH_LOG_RETAIN_BYTES", 64)
+
+    daemon_mod._compact_watch_log(log_path)
+
+    compacted = log_path.read_bytes()
+    assert len(compacted) <= 64
+    assert compacted.endswith(b"recent event\n")
+    assert not compacted.startswith(b"ld event")
+
+
 # ── PID file round-trip ────────────────────────────────────────────
 
 

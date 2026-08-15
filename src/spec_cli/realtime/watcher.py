@@ -265,8 +265,8 @@ class WatcherOptions:
     self_user_id: int | None
     self_handle: str | None = None
     self_name: str | None = None
-    # Stable per-(machine, bundle) id (``~/.spec/broadcast-client-ids/``).
-    # Used when posting and when filtering SSE echoes on ``spec watch``.
+    # Stable machine id (``~/.spec/broadcast-client-id``). Used when posting
+    # and when attributing same-account events on ``spec watch``.
     broadcast_client_id: str | None = None
     poll_interval: float = DEFAULT_POLL_INTERVAL_SECS
     presence_interval: float = DEFAULT_PRESENCE_INTERVAL_SECS
@@ -277,6 +277,10 @@ class WatcherOptions:
     # repository presence only. ``project`` preserves direct/legacy watches.
     prompt_scope: Literal["project", "machine", "none"] = "project"
     receive: bool = True
+    # Background service daemons still consume events for coordination and
+    # presence mirrors, but should not duplicate full conversations into every
+    # bundle's ``.spec/watch.log``. Foreground watches leave this enabled.
+    render_received: bool = True
     mirror: bool = False
     presence_enabled: bool = True
     # Broadcaster verbosity: when True (default since v0.4) we POST
@@ -550,6 +554,7 @@ def run_watcher(
         strip_code_blocks=not opts.show_tool_runs,
         self_user_id=opts.self_user_id,
         local_broadcast_client_id=opts.broadcast_client_id,
+        echo_prompt_context=False,
     )
     if not opts.broadcast:
         notifier.announce_broadcast_disabled()
@@ -698,7 +703,8 @@ def run_watcher(
                             last_local_presence,
                         )
                     return
-                notifier.show(event)
+                if opts.render_received:
+                    notifier.show(event)
                 if mirror is not None:
                     mirror.write_event(event)
             finally:
