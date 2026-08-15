@@ -8,13 +8,14 @@ or skip events on resume (worse), so the contract is pinned tightly.
 """
 from __future__ import annotations
 
+import errno
 import json
 
 from spec_cli.realtime.tracker import (
     CURSOR_DIRNAME,
     CURSOR_FILENAME,
-    SCHEMA_VERSION,
     PRODUCER_BASELINE_VERSION,
+    SCHEMA_VERSION,
     LiveCursor,
 )
 
@@ -142,3 +143,16 @@ def test_save_is_atomic_via_rename(tmp_path):
         # File must always parse — no half-written intermediate state.
         path = tmp_path / CURSOR_DIRNAME / CURSOR_FILENAME
         json.loads(path.read_text())
+
+
+def test_save_fails_open_when_tempfile_cannot_be_created(tmp_path, monkeypatch):
+    cursor = LiveCursor.load(tmp_path, project_id=1)
+    cursor.record_received(12)
+
+    def no_space(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("spec_cli.realtime.tracker.tempfile.mkstemp", no_space)
+
+    cursor.save()
+    assert not (tmp_path / CURSOR_DIRNAME / CURSOR_FILENAME).exists()

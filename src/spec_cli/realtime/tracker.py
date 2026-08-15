@@ -295,11 +295,15 @@ class LiveCursor:
                 },
                 "producer_baseline_version": self.producer_baseline_version,
             }
-        tmp_fd, tmp_name = tempfile.mkstemp(
-            prefix=f"{CURSOR_FILENAME}.",
-            suffix=".tmp",
-            dir=str(path.parent),
-        )
+        try:
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                prefix=f"{CURSOR_FILENAME}.",
+                suffix=".tmp",
+                dir=str(path.parent),
+            )
+        except OSError as e:
+            log.info("spec-live: cursor save failed: %s", e)
+            return
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(payload, f, separators=(",", ":"))

@@ -40,6 +40,11 @@ accepted teammates see all sessions authored by one another. Unrelated users
 remain limited to conversations in bundles they can already read. Tool calls
 are still inspected by the critic when collapsed.
 
+After `spec on`, a foreground `spec watch` reuses the registered background
+watchers as producers and acts as a workspace-wide viewer. It does not start a
+second producer for the current bundle. Temporary Cloud failures reconnect in
+place, so deploy windows do not turn registered projects into `Stopped` rows.
+
 `spec prs` uses the signed-in GitHub CLI identity and deduplicates GitHub origins
 across registered bundles. `spec review --with cloud` adds the explicit
 `agent-review` label, allowing Actionairy to authorize a read-only, exact-SHA

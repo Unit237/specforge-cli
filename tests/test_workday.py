@@ -6,11 +6,13 @@ from types import SimpleNamespace
 
 from click.testing import CliRunner
 
+from spec_cli.api import ApiError
 from spec_cli.cli import cli
+from spec_cli.commands.workday import _cloud_login_error, _known_bundle_roots
+from spec_cli.config import Credentials
 from spec_cli.preferences import Preferences, load_preferences, remember_bundle
 from spec_cli.realtime import StartOutcome, StopOutcome
 from spec_cli.realtime.active_edits import ActiveEditsStore
-from spec_cli.commands.workday import _known_bundle_roots
 
 
 def _bundle(tmp_path: Path) -> Path:
@@ -244,6 +246,22 @@ def test_spec_on_preflights_expired_login_before_starting_watchers(
     assert "Session expired" in result.output
     assert "run `spec login`, then `spec on` again" in result.output
     assert load_preferences().autostart == "default"
+
+
+def test_spec_on_does_not_block_watchers_for_transient_cloud_failure(
+    monkeypatch,
+) -> None:
+    class _UnavailableCloud:
+        def __init__(self, _creds) -> None:
+            pass
+
+        def _request(self, *_args, **_kwargs):
+            raise ApiError("502 Bad Gateway", status=502, transient=True)
+
+    monkeypatch.setattr("spec_cli.commands.workday.CloudClient", _UnavailableCloud)
+    creds = Credentials(api_base="https://spec.test", access_token="token")
+
+    assert _cloud_login_error(creds) is None
 
 
 def test_spec_off_disables_preferences_stops_all_and_releases_locks(

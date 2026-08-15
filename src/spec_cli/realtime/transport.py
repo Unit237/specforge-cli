@@ -30,6 +30,7 @@ from typing import Callable, Iterator
 
 import requests
 
+from ..http_retry import is_transient_http_status, short_retry_delay
 from .events import IncomingEvent, IncomingFlag, OutgoingEvent
 
 log = logging.getLogger(__name__)
@@ -155,16 +156,19 @@ class HTTPPoster:
                 )
                 if attempt + 1 >= max_attempts:
                     return False, None
-                time.sleep(min(2.0, 0.25 * (2**attempt)))
+                time.sleep(short_retry_delay(attempt))
                 continue
-            if r.status_code in (429, 502, 503, 504) and attempt + 1 < max_attempts:
+            if (
+                is_transient_http_status(r.status_code)
+                and attempt + 1 < max_attempts
+            ):
                 log.warning(
                     "spec-live: post transient HTTP %s — retrying (%s/%s)",
                     r.status_code,
                     attempt + 1,
                     max_attempts,
                 )
-                time.sleep(min(2.0, 0.25 * (2**attempt)))
+                time.sleep(short_retry_delay(attempt))
                 continue
             if r.status_code >= 400:
                 body = r.text[:200]
@@ -377,6 +381,11 @@ class SSEConsumer:
                 raise SSEStreamError(
                     f"prompt-stream rejected: {resp.status_code} — "
                     "is the project resolvable from this account?"
+                )
+            if is_transient_http_status(resp.status_code):
+                raise requests.HTTPError(
+                    f"prompt-stream temporarily unavailable ({resp.status_code})",
+                    response=resp,
                 )
             if resp.status_code >= 400:
                 raise SSEStreamError(

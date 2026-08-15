@@ -44,6 +44,9 @@ from ..ui import console, flush_streaming_output
 from .critic import SEV_HIGH, Critique, critique_event, suggested_flag_command
 from .events import IncomingEvent, IncomingFlag, ToolCallPayload
 
+# One label for every command that consumes the account/team-wide stream.
+WORKSPACE_FEED_LABEL = "workspace (all bundles)"
+
 # Local wall clock for live panes — include the calendar date so
 # overnight / multi-day ``spec team watch`` sessions stay readable.
 _LIVE_EVENT_CLOCK_FMT = "%Y-%m-%d %H:%M:%S"
@@ -1332,5 +1335,4 @@ class Notifier:
             flush_streaming_output()
 
 
-__all__ = ["Notifier"]
-
+__all__ = ["Notifier", "WORKSPACE_FEED_LABEL"]

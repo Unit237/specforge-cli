@@ -124,6 +124,11 @@ def _cloud_login_error(creds) -> str | None:
     try:
         CloudClient(creds)._request("GET", "/api/auth/me")  # noqa: SLF001
     except ApiError as exc:
+        # A valid saved credential should not prevent local watchers from
+        # starting during a deploy or network outage. Background watchers
+        # retain their PID and retry Cloud resolution until service returns.
+        if exc.transient:
+            return None
         return str(exc)
     return None
 
