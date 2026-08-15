@@ -184,7 +184,7 @@ the compiler sees on the next run — see
 | `spec init` | Scaffold `spec.yaml`, `docs/product.md`, `prompts/scaffold.md`, `prompts/sessions/`, and `AGENTS.md`. |
 | `spec discover [ROOT]` | System-wide repository inventory. ROOT is remembered; no ROOT scans all saved workspaces. Registers existing bundles and optionally initializes new ones. |
 | `spec on` / `spec off` | Connect and start every registered watcher, or stop them all. Connecting uploads no repository content. |
-| `spec activity [--show-tool-runs]` | Workspace-wide live feed for Codex, Claude Code, Cursor, and Compress. Tool calls stay collapsed unless requested. |
+| `spec activity [--show-tool-runs]` | Workspace-wide live feed for Codex, Claude Code, Cursor, and Compress. Tool calls stay hidden unless requested, then render as a grouped digest. |
 | `spec prs [--all-authors]` | Open GitHub PRs across repositories registered with Spec watch. Defaults to your PRs. |
 | `spec review [--pr OWNER/REPO#N] [--with cloud|@TEAMMATE]` | Request a SHA-bound Compress cloud review or a native GitHub teammate review. |
 | `spec status` | Git-like sections: staged for push, modified (out-of-date snapshot vs not staged), untracked, etc. |
@@ -242,7 +242,7 @@ one:
 spec on                             # connect + start every registered project
 spec status                         # plain Watching / Stopped / Needs connection states
 spec activity                       # every teammate and agent across the workspace
-spec activity --show-tool-runs      # expand longer tool calls and code blocks
+spec activity --show-tool-runs      # grouped tool digest plus code blocks
 spec off                            # stop all watchers and release local locks
 ```
 

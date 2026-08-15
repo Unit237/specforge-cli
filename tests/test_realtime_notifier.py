@@ -441,14 +441,10 @@ def test_default_team_watch_strips_code_blocks_from_assistant_body(monkeypatch):
     assert "[code: python" in out
 
 
-def test_show_tool_runs_renders_each_tool_call_under_body(monkeypatch):
-    """``spec team watch --show-tool-runs`` expands the assistant
-    turn's ``tool_calls`` list as one indented line per call so a
-    reviewer can see every file the agent touched and every command
-    it ran without leaving the pane. The list is what the user is
-    after when they pass the flag; code blocks in prose stay intact
-    in that mode (a reviewer asking for tool detail wants the code
-    too)."""
+def test_show_tool_runs_renders_grouped_tool_digest(monkeypatch):
+    """``--show-tool-runs`` groups calls by kind with representative
+    targets so busy agent loops remain readable without hiding the signal.
+    """
     import spec_cli.realtime.notifier as notifier_mod
 
     cap = _recording_console()
@@ -476,6 +472,7 @@ def test_show_tool_runs_renders_each_tool_call_under_body(monkeypatch):
         author_avatar_url=None,
         tool_calls=[
             ToolCallPayload(name="Read", args={"path": "auth.py"}),
+            ToolCallPayload(name="Read", args={"path": "users.py"}),
             ToolCallPayload(name="Edit", args={"path": "auth.py"}),
             ToolCallPayload(name="Bash", args={"command": "pytest -q"}),
         ],
@@ -485,10 +482,12 @@ def test_show_tool_runs_renders_each_tool_call_under_body(monkeypatch):
     out = cap.export_text()
     # The header carries the count so reviewers know what they're
     # scrolling past.
-    assert "3 tool runs" in out
-    assert "Read auth.py" in out
-    assert "Edit auth.py" in out
-    assert 'Bash "pytest -q"' in out
+    assert "4 tool runs" in out
+    assert "Read ×2" in out
+    assert "Edit ×1" in out
+    assert "Bash ×1" in out
+    assert "auth.py · users.py" in out
+    assert '"pytest -q"' in out
 
 
 def test_show_tool_runs_compact_still_renders_tool_calls(monkeypatch):
@@ -527,7 +526,8 @@ def test_show_tool_runs_compact_still_renders_tool_calls(monkeypatch):
     n.show(ev)
     out = cap.export_text()
     assert "1 tool run" in out
-    assert "Read x.py" in out
+    assert "Read ×1" in out
+    assert "x.py" in out
 
 
 def test_show_completed_pair_renders_paired_banner(monkeypatch):

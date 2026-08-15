@@ -1000,35 +1000,44 @@ class Notifier:
             flush_streaming_output()
 
     def _render_tool_calls(self, calls: list[ToolCallPayload]) -> None:
-        """Print one line per tool invocation under the assistant body.
+        """Print a compact, structured tool digest under the assistant body.
 
-        The header carries a count so a reviewer can see at a glance
-        whether they're about to scroll past two edits or thirty;
-        each subsequent line is the same shape the auto-critic
-        scans for destructive verbs (``Bash "rm -rf"``,
-        ``Edit auth.py``), so a reviewer's pattern-recognition
-        transfers across both surfaces.
+        Calls are grouped by canonical tool name with a few ordered examples
+        per group.  This preserves the important review signal (what kinds of
+        actions ran, how often, and representative targets) without turning a
+        busy agent loop into dozens of visually identical terminal rows.
         """
         if not calls:
             return
         n = len(calls)
-        console.print(
-            f"    [sf.muted]» {n} tool run{'s' if n != 1 else ''}:[/]"
+        grouped: dict[str, list[str]] = {}
+        for call in calls:
+            grouped.setdefault(call.name, []).append(_format_tool_call_line(call))
+        counts = " · ".join(
+            f"{name} ×{len(lines)}" for name, lines in grouped.items()
         )
-        # Cap the list at a generous bound — reviewers who need every
-        # call can inspect the captured ``.prompts`` file. 50 covers
-        # virtually every realistic agent
-        # session without flooding the pane.
-        shown = calls[:50]
-        for call in shown:
-            line = _format_tool_call_line(call)
+        console.print(
+            f"    [sf.muted]» {n} tool run{'s' if n != 1 else ''} · "
+            f"{escape(counts)}[/]",
+            highlight=False,
+        )
+        for name, lines in grouped.items():
+            examples: list[str] = []
+            for line in lines:
+                detail = line[len(name):].strip()
+                label = detail or name
+                if label not in examples:
+                    examples.append(label)
+                if len(examples) == 4:
+                    break
+            rendered = " · ".join(examples)
+            extra = len(lines) - len(examples)
+            if extra > 0:
+                rendered = f"{rendered} · +{extra} more"
             console.print(
-                f"    [sf.muted]·[/] {escape(line)}",
+                f"    [sf.muted]· {escape(name):<10}[/] {escape(rendered)}",
                 highlight=False,
             )
-        extra = n - len(shown)
-        if extra > 0:
-            console.print(f"    [sf.muted]· …+{extra} more tools[/]")
 
     # ── critic + session-pair plumbing ────────────────────────────
 
