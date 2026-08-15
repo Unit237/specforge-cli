@@ -77,8 +77,8 @@ activity_cmd.help = """Stream every agent turn across your Spec workspace.
 
 Shows prompts and assistant prose from Codex, Claude Code, Cursor, and
 Compress across every bundle you can access. Tool calls and large code blocks
-stay collapsed by default; add ``--show-tool-runs`` when you need the longer
-execution trace. This is receive-only and works outside a bundle directory.
+stay collapsed by default; add ``--show-tool-runs`` for a grouped execution
+digest. This is receive-only and works outside a bundle directory.
 
 Examples:
 

@@ -385,6 +385,27 @@ def _build_codex_rollout_session(
     builder.title = title
     builder.model = model
 
+    # Modern Codex rollouts include two different ``role=user`` shapes:
+    #
+    # * ``response_item`` rows containing injected app/developer context, and
+    # * ``event_msg.user_message`` rows containing the human's actual prompt.
+    #
+    # The latter is the canonical conversation event.  Keep a response-item
+    # user row pending only as a legacy fallback; a following ``turn_context``
+    # proves it was injected context, while a same-turn ``user_message``
+    # supersedes it.  This prevents both the raw ``<INSTRUCTIONS>`` blocks and
+    # duplicate human prompts from reaching Spec Live.
+    pending_response_user: tuple[str, datetime | None] | None = None
+    internal_approval_review = (model or "").strip() == "codex-auto-review"
+
+    def flush_pending_response_user() -> None:
+        nonlocal pending_response_user
+        if pending_response_user is None:
+            return
+        text, at = pending_response_user
+        builder.turns.append(Turn(role="user", text=text, at=at))
+        pending_response_user = None
+
     # Tool calls Codex emitted in JSONL rows *between* the previous
     # assistant message and the next. Attached to the upcoming
     # assistant turn so a reviewer sees one event per logical reply
@@ -409,11 +430,26 @@ def _build_codex_rollout_session(
                 builder.model = pmodel.strip()[:MAX_TURN_MODEL_CHARS]
             continue
 
+        if rtype == "turn_context" and isinstance(payload, dict):
+            # A pending response-item user row immediately before the turn
+            # context is Codex's injected instruction/environment envelope,
+            # not a human message.
+            pending_response_user = None
+            pmodel = payload.get("model") or payload.get("model_slug")
+            if isinstance(pmodel, str) and pmodel.strip():
+                builder.model = pmodel.strip()[:MAX_TURN_MODEL_CHARS]
+                if pmodel.strip() == "codex-auto-review":
+                    internal_approval_review = True
+            continue
+
         if rtype == "event_msg" and isinstance(payload, dict):
             ptype = payload.get("type")
             if ptype == "user_message":
                 text = payload.get("message")
                 if isinstance(text, str) and text.strip():
+                    # Prefer Codex's explicit human-message event over the
+                    # duplicate response-item row emitted at the same turn.
+                    pending_response_user = None
                     builder.turns.append(
                         Turn(
                             role="user",
@@ -431,6 +467,7 @@ def _build_codex_rollout_session(
         # assistant message so the wire carries "prose + structured
         # tool list" in one event.
         if ptype in ("function_call", "local_shell_call"):
+            flush_pending_response_user()
             call = _codex_function_call_to_tool(payload)
             if call is not None:
                 pending_tool_calls.append(call)
@@ -461,10 +498,13 @@ def _build_codex_rollout_session(
                         )
                     )
                     pending_tool_calls = []
-                builder.turns.append(Turn(role="user", text=text, at=ts))
+                if pending_response_user is not None:
+                    flush_pending_response_user()
+                pending_response_user = (text, ts)
             continue
         if role != "assistant":
             continue
+        flush_pending_response_user()
         text = _content_text_from_response_item(payload.get("content"))
         # A truly empty assistant message with no pending tools is
         # almost always a streaming artefact — drop it. Otherwise we
@@ -484,6 +524,17 @@ def _build_codex_rollout_session(
             )
         )
         pending_tool_calls = []
+
+    flush_pending_response_user()
+
+    # Approval-review tasks quote the parent transcript, including tool
+    # arguments and results, into a separate internal Codex session.  They are
+    # operational control-plane traffic, not another human/agent conversation;
+    # importing them duplicates the parent session and can add tens of
+    # kilobytes per approval.  The structured calls on the parent session are
+    # already captured separately, so omit the review session at its source.
+    if internal_approval_review:
+        return None
 
     # Trailing function calls with no closing assistant message — emit
     # them so the reviewer still sees what the agent did.

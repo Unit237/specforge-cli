@@ -117,9 +117,9 @@ def _resolve_watch_project(
     default=False,
     show_default=True,
     help=(
-        "Expand each incoming assistant turn's structured ``tool_calls`` "
-        "list under the prose body (``Edit auth.py``, ``Bash \"pytest -q\"``, "
-        "``Read main.py``…), and keep fenced code blocks in the prose "
+        "Show each incoming assistant turn's structured ``tool_calls`` as a "
+        "grouped digest (``Edit ×2``, ``Bash ×1``, ``Read ×4``), and keep "
+        "fenced code blocks in the prose "
         "intact instead of collapsing them to ``[code: lang ~N lines]``. "
         "Off by default — the default pane shows full AI narration "
         "without code so concurrent threads stay scannable. The auto-critic "

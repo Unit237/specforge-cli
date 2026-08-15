@@ -332,6 +332,106 @@ def test_read_codex_rollout_session_extracts_and_redacts(tmp_path: Path) -> None
     assert session.turns[1].text == "Done. I will write the prompts file."
 
 
+def test_codex_rollout_keeps_only_canonical_human_user_message(
+    tmp_path: Path,
+) -> None:
+    """Modern rollouts mirror prompts into response_item rows and inject
+    instruction envelopes before turn_context.  Neither is a second user turn.
+    """
+    rollout = tmp_path / "rollout.jsonl"
+    rows = [
+        {
+            "timestamp": "2026-08-15T01:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "human-session", "cwd": str(tmp_path)},
+        },
+        {
+            "timestamp": "2026-08-15T01:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "<INSTRUCTIONS>internal</INSTRUCTIONS>"}],
+            },
+        },
+        {
+            "timestamp": "2026-08-15T01:00:01Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.6-sol"},
+        },
+        {
+            "timestamp": "2026-08-15T01:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Fix the watcher."}],
+            },
+        },
+        {
+            "timestamp": "2026-08-15T01:00:02Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Fix the watcher."},
+        },
+        {
+            "timestamp": "2026-08-15T01:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Fixed."}],
+            },
+        },
+    ]
+    rollout.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    session = read_codex_rollout_session(rollout, verbose=True)
+
+    assert session is not None
+    assert session.model == "gpt-5.6-sol"
+    assert [turn.role for turn in session.turns] == ["user", "assistant"]
+    assert session.turns[0].text == "Fix the watcher."
+    assert all("INSTRUCTIONS" not in (turn.text or "") for turn in session.turns)
+
+
+def test_codex_rollout_omits_internal_approval_review_session(
+    tmp_path: Path,
+) -> None:
+    rollout = tmp_path / "approval-review.jsonl"
+    rows = [
+        {
+            "timestamp": "2026-08-15T01:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "approval-session", "cwd": str(tmp_path)},
+        },
+        {
+            "timestamp": "2026-08-15T01:00:01Z",
+            "type": "turn_context",
+            "payload": {"model": "codex-auto-review"},
+        },
+        {
+            "timestamp": "2026-08-15T01:00:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "The following is the Codex agent history whose request action you are assessing.\n[tool results omitted]",
+            },
+        },
+        {
+            "timestamp": "2026-08-15T01:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": '{"outcome":"allow"}'}],
+            },
+        },
+    ]
+    rollout.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    assert read_codex_rollout_session(rollout, verbose=True) is None
+
+
 def test_list_recent_codex_sessions_from_state_db(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "codex"
     home.mkdir()
