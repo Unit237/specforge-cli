@@ -52,6 +52,7 @@ from ..prompts.schema import (
     Session,
     ToolCall,
     Turn,
+    VALID_TURN_PHASES,
     validate_session,
 )
 from ..prompts.text_sanitize import (
@@ -506,6 +507,13 @@ def _build_codex_rollout_session(
             continue
         flush_pending_response_user()
         text = _content_text_from_response_item(payload.get("content"))
+        raw_phase = payload.get("phase")
+        phase = (
+            raw_phase.strip().lower()
+            if isinstance(raw_phase, str)
+            and raw_phase.strip().lower() in VALID_TURN_PHASES
+            else None
+        )
         # A truly empty assistant message with no pending tools is
         # almost always a streaming artefact — drop it. Otherwise we
         # always emit a turn so the structured tool list lands.
@@ -521,6 +529,7 @@ def _build_codex_rollout_session(
                 at=ts,
                 model=builder.model,
                 tool_calls=list(pending_tool_calls),
+                phase=phase,
             )
         )
         pending_tool_calls = []
@@ -605,6 +614,11 @@ def list_recent_codex_sessions(
 
     out: list[CodexRecentSession] = []
     for sid, title, cwd, rollout_path, updated_ms, model in rows:
+        # Approval-review threads are Codex control-plane work that quote the
+        # parent conversation. They must not appear as capture candidates or
+        # live chats; the rollout parser retains the same defensive check.
+        if isinstance(model, str) and model.strip() == "codex-auto-review":
+            continue
         if not isinstance(rollout_path, str) or not rollout_path:
             continue
         path = Path(rollout_path).expanduser()

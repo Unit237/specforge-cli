@@ -195,6 +195,7 @@ class OutgoingEvent:
     branch: str | None = None
     commit_sha: str | None = None
     model: str | None = None
+    phase: str | None = None
     summary: str | None = None
     text: str | None = None
     title: str | None = None
@@ -230,6 +231,7 @@ class OutgoingEvent:
             "branch": _clip(self.branch, _MAX_BRANCH_CHARS),
             "commit_sha": _clip(self.commit_sha, _MAX_COMMIT_SHA_CHARS),
             "model": _clip(self.model, _MAX_MODEL_CHARS),
+            "phase": _clip(self.phase, 32),
             "summary": _clip(self.summary, _MAX_SUMMARY_CHARS),
             "text": _clip(self.text, _MAX_TURN_TEXT_CHARS),
             "title": _clip(self.title, _MAX_TITLE_CHARS),
@@ -322,6 +324,7 @@ class IncomingEvent:
     author_handle: str | None
     author_name: str
     author_avatar_url: str | None
+    phase: str | None = None
     presence: PresencePayload | None = None
     bundle_label: str | None = None
     tool_calls: list[ToolCallPayload] = field(default_factory=list)
@@ -361,6 +364,7 @@ class IncomingEvent:
             branch=_str_or_none(payload.get("branch")),
             commit_sha=_str_or_none(payload.get("commit_sha")),
             model=_str_or_none(payload.get("model")),
+            phase=_str_or_none(payload.get("phase")),
             summary=_str_or_none(payload.get("summary")),
             text=_str_or_none(payload.get("text")),
             title=_str_or_none(payload.get("title")),

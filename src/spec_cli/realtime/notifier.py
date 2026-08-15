@@ -41,7 +41,13 @@ from ..prompts.text_sanitize import (
     unwrap_cursor_user_message,
 )
 from ..ui import console, flush_streaming_output
-from .critic import SEV_HIGH, Critique, critique_event, suggested_flag_command
+from .critic import (
+    SEV_HIGH,
+    Critique,
+    critique_event,
+    is_tool_only_summary,
+    suggested_flag_command,
+)
 from .events import IncomingEvent, IncomingFlag, ToolCallPayload
 
 # One label for every command that consumes the account/team-wide stream.
@@ -151,6 +157,33 @@ def _session_color(session_id: str | None) -> str:
     return _SESSION_PALETTE[digest[0] % len(_SESSION_PALETTE)]
 
 
+def _event_context_line(event: IncomingEvent) -> str:
+    """Stable chat identity plus optional repository context for one row."""
+    session_color = _session_color(event.session_id)
+    parts: list[str] = []
+    title = (event.title or "").strip()
+    if title:
+        parts.append(
+            f"[sf.muted]chat[/] [bold {session_color}]"
+            f"{escape(_truncate(title, 72))}[/]"
+        )
+    cwd_chip = _short_cwd(event.cwd)
+    if cwd_chip:
+        parts.append(f"[sf.muted]cwd[/] [sf.label]{escape(cwd_chip)}[/]")
+    paths_chip = _paths_chip(event.paths_touched)
+    if paths_chip:
+        parts.append(
+            f"[sf.muted]touched[/] [sf.label]{escape(paths_chip)}[/]"
+        )
+    session_chip = _short_session(event.session_id)
+    if session_chip:
+        parts.append(
+            f"[sf.muted]session[/] [bold {session_color}]"
+            f"{escape(session_chip)}[/]"
+        )
+    return "  ".join(parts)
+
+
 # Markdown / pasted-log code blocks the user explicitly does *not*
 # want in the default ``spec team watch`` view. Matches fenced
 # ```lang …``` blocks (greedy across newlines), plus 4-space-indented
@@ -251,10 +284,21 @@ _FLAG_GLYPH = {
 # every Rich-capable terminal.
 _USER_BADGE = "[bold black on #3ddab4] USER [/]"
 _AI_BADGE = "[bold black on #7de3ff]  AI  [/]"
+_UPDATE_BADGE = "[bold white on #536273] UPDATE [/]"
+_ANSWER_BADGE = "[bold black on #7de3ff] ANSWER [/]"
 # Red ERROR badge used when an adapter ships ``role = "error"`` —
 # agent timeout, refused request, tool failure. Lights up the pane so
 # a reviewer notices an agent in trouble without having to read text.
 _ERROR_BADGE = "[bold white on #d63a4e] ERROR [/]"
+
+
+def _assistant_badge_and_relation(phase: str | None) -> tuple[str, str]:
+    """Map source-level delivery phase to visible, accessible semantics."""
+    if phase == "commentary":
+        return _UPDATE_BADGE, "progress for"
+    if phase == "final_answer":
+        return _ANSWER_BADGE, "answer to"
+    return _AI_BADGE, "replying to"
 
 # Source → display color. Each adapter the watcher can stream from
 # gets its own muted-but-distinct hue so a reviewer can tell which
@@ -611,6 +655,22 @@ class Notifier:
         return ""
 
     def show(self, event: IncomingEvent) -> None:
+        # Completion frames exist only to flush coalescers. Rendering them as
+        # assistant messages produced the empty AI rows that buried real chat.
+        if event.role == "assistant_closed":
+            self.record_pairing(event)
+            return
+        # Non-dangerous tool-only rows obey the same opt-in contract as the
+        # structured digest. The critic can still break through this filter.
+        if (
+            event.role == "assistant"
+            and is_tool_only_summary(event.summary)
+            and not self._show_tool_runs
+            and not (self._critic_enabled and critique_event(event))
+        ):
+            self.record_pairing(event)
+            return
+
         time_label = _short_time(event.turn_at or event.received_at)
         author = event.author_display
         om = self._other_machine_note(event)
@@ -627,23 +687,7 @@ class Notifier:
         # All three are optional: we only render the divider before a
         # chip when it actually has content, so a quiet stream stays
         # clean and a busy stream still fits on one line.
-        cwd_chip = _short_cwd(event.cwd)
-        paths_chip = _paths_chip(event.paths_touched)
-        session_chip = _short_session(event.session_id)
-        session_color = _session_color(event.session_id)
-        ctx_parts: list[str] = []
-        if cwd_chip:
-            ctx_parts.append(f"[sf.muted]cwd[/] [sf.label]{cwd_chip}[/]")
-        if paths_chip:
-            ctx_parts.append(f"[sf.muted]touched[/] [sf.label]{paths_chip}[/]")
-        if session_chip:
-            # Per-session stable color so concurrent threads from two
-            # teammates stay visually disambiguated as their events
-            # interleave in the pane.
-            ctx_parts.append(
-                f"[sf.muted]session[/] [bold {session_color}]{session_chip}[/]"
-            )
-        ctx_line = "  ".join(ctx_parts) if ctx_parts else ""
+        ctx_line = _event_context_line(event)
 
         critiques: list[Critique] = []
         pair_key = self._session_pair_key(event)
@@ -712,9 +756,10 @@ class Notifier:
             # AI badge (cyan background). The model name carries the
             # source's accent color so "claude_code/claude-sonnet-4"
             # and "codex/gpt-5" read as cleanly separable identities.
+            badge, relation = _assistant_badge_and_relation(event.phase)
             head = (
-                f"{_AI_BADGE} [bold #7de3ff]{model}[/] "
-                f"[sf.muted]· replying to[/] [bold #3ddab4]{author}[/]{om} "
+                f"{badge} [bold #7de3ff]{model}[/] "
+                f"[sf.muted]· {relation}[/] [bold #3ddab4]{author}[/]{om} "
                 f"[sf.muted]· in[/] {source_label} "
                 f"[sf.muted]· {branch} · {time_label}[/]"
                 f"{bundle}"
@@ -767,8 +812,6 @@ class Notifier:
                 # as the body so a vertical scan groups header →
                 # context → body cleanly.
                 console.print(f"  {ctx_line}")
-            if event.title and event.role == "user":
-                console.print(f"  [sf.muted]title:[/] {_truncate(event.title, 200)}")
             if pending_prompt:
                 _, prev_txt = pending_prompt
                 console.print(
@@ -830,22 +873,6 @@ class Notifier:
         """
         self._recent_completed_pairs.append((user, assistant))
 
-        def _ctx_line(ev: IncomingEvent) -> str:
-            cwd_chip = _short_cwd(ev.cwd)
-            paths_chip = _paths_chip(ev.paths_touched)
-            session_chip = _short_session(ev.session_id)
-            session_color = _session_color(ev.session_id)
-            parts: list[str] = []
-            if cwd_chip:
-                parts.append(f"[sf.muted]cwd[/] [sf.label]{cwd_chip}[/]")
-            if paths_chip:
-                parts.append(f"[sf.muted]touched[/] [sf.label]{paths_chip}[/]")
-            if session_chip:
-                parts.append(
-                    f"[sf.muted]session[/] [bold {session_color}]{session_chip}[/]"
-                )
-            return "  ".join(parts) if parts else ""
-
         u_author = user.author_display
         u_branch = user.branch or "-"
         u_src = _source_label(user.source)
@@ -862,7 +889,7 @@ class Notifier:
         )
         u_preview_raw = self._user_visible_text(user)
         u_preview = _truncate(u_preview_raw, self._user_preview_limit())
-        u_ctx = _ctx_line(user)
+        u_ctx = _event_context_line(user)
 
         a_author = assistant.author_display
         a_branch = assistant.branch or "-"
@@ -875,9 +902,10 @@ class Notifier:
         a_time = _short_time(assistant.turn_at or assistant.received_at)
         model = assistant.model or "assistant"
         a_om = self._other_machine_note(assistant)
+        a_badge, a_relation = _assistant_badge_and_relation(assistant.phase)
         a_head = (
-            f"{_AI_BADGE} [bold #7de3ff]{model}[/] "
-            f"[sf.muted]· replying to[/] [bold #3ddab4]{a_author}[/]{a_om} "
+            f"{a_badge} [bold #7de3ff]{model}[/] "
+            f"[sf.muted]· {a_relation}[/] [bold #3ddab4]{a_author}[/]{a_om} "
             f"[sf.muted]· in[/] {a_src} "
             f"[sf.muted]· {a_branch} · {a_time}[/]"
             f"{a_bundle}"
@@ -890,7 +918,7 @@ class Notifier:
         a_preview = _truncate(
             a_preview, self._assistant_body_limit_for_completed_pair()
         )
-        a_ctx = _ctx_line(assistant)
+        a_ctx = _event_context_line(assistant)
         pending_line = (u_author, u_preview) if u_preview else None
 
         a_critiques: list[Critique] = []
@@ -944,10 +972,6 @@ class Notifier:
             console.print(u_head)
             if u_ctx:
                 console.print(f"  {u_ctx}")
-            if user.title:
-                console.print(
-                    f"  [sf.muted]title:[/] {_truncate(user.title, 200)}"
-                )
             if u_preview:
                 for line in u_preview.splitlines():
                     console.print(

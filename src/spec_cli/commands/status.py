@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import click
+from rich.markup import escape
 
 from ..config import BundleNotFoundError, find_bundle_root, load_manifest
 from ..constants import PROMPTS_DIRNAME
@@ -67,9 +68,16 @@ def _print_pending_prompt_captures(root) -> None:
     )
     for sid, title, model, asst_hint in peek.examples:
         short = sid[:12] + ("…" if len(sid) > 12 else "")
-        model_bit = f"  [sf.muted]· session {model}[/]" if model else ""
-        hint_bit = f"  [sf.muted]· {asst_hint}[/]" if asst_hint else ""
-        console.print(f"  [sf.muted]·[/] {short}  {title}{model_bit}{hint_bit}")
+        model_bit = (
+            f"  [sf.muted]· session {escape(model)}[/]" if model else ""
+        )
+        hint_bit = (
+            f"  [sf.muted]· {escape(asst_hint)}[/]" if asst_hint else ""
+        )
+        console.print(
+            f"  [sf.muted]·[/] {escape(short)}  {escape(title)}"
+            f"{model_bit}{hint_bit}"
+        )
     if peek.new_session_count > len(peek.examples):
         more = peek.new_session_count - len(peek.examples)
         dim(f"  · …and {more} more")

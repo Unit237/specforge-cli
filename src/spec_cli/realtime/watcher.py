@@ -224,6 +224,7 @@ def _post_assistant_closed(
         branch=branch or None,
         commit_sha=git.commit_sha if git else None,
         model=session.model,
+        phase=None,
         summary=None,
         text=None,
         title=redact_text((session.title or "").strip()) or None,
@@ -332,6 +333,11 @@ def build_watch_bootstrap_events(
             continue
         role = raw.get("role")
         if role == "presence":
+            continue
+        if role == "assistant_closed":
+            # Transport sentinel for coalescing, not visible history. Keeping
+            # it out of bootstrap prevents long Codex runs from evicting the
+            # human prompt and named chat context from the replay window.
             continue
         try:
             ev = IncomingEvent.from_json(raw)
@@ -1431,6 +1437,7 @@ def _build_outgoing(
         branch=branch or None,
         commit_sha=git.commit_sha if git else None,
         model=turn.model or session.model,
+        phase=turn.phase,
         summary=summary,
         text=text_out,
         title=title,

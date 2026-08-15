@@ -41,6 +41,7 @@ VALID_SOURCES: frozenset[str] = frozenset(
     {"claude_code", "cursor", "codex", "compress", "manual"}
 )
 VALID_ROLES: frozenset[str] = frozenset({"user", "assistant"})
+VALID_TURN_PHASES: frozenset[str] = frozenset({"commentary", "final_answer"})
 # `tool_result` is reserved — see docs/prompt-format.md. Rejected in v0.1.
 RESERVED_ROLES: frozenset[str] = frozenset({"tool_result"})
 VALID_OUTCOMES: frozenset[str] = frozenset(
@@ -156,6 +157,10 @@ class Turn:
     # remains first-seen / legacy summary for the thread).
     model: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
+    # Live-only assistant delivery phase. This is intentionally not serialized
+    # into the v0.1 `.prompts` interchange format: it controls activity-feed
+    # presentation, not compiled conversational history.
+    phase: str | None = None
 
 
 @dataclass
@@ -804,6 +809,11 @@ def validate_session(session: Session, *, path: str = "session") -> None:
                     "user turns must not carry `model`",
                     path=f"{tpath}.model",
                 )
+            if t.phase is not None:
+                raise PromptSchemaError(
+                    "user turns must not carry `phase`",
+                    path=f"{tpath}.phase",
+                )
         else:
             if t.text is not None and not session.verbose:
                 raise PromptSchemaError(
@@ -829,6 +839,11 @@ def validate_session(session: Session, *, path: str = "session") -> None:
                         f"model exceeds {MAX_TURN_MODEL_CHARS} chars",
                         path=f"{tpath}.model",
                     )
+            if t.phase is not None and t.phase not in VALID_TURN_PHASES:
+                raise PromptSchemaError(
+                    f"unknown phase `{t.phase}`. Valid: {sorted(VALID_TURN_PHASES)}",
+                    path=f"{tpath}.phase",
+                )
 
         for j, call in enumerate(t.tool_calls):
             cpath = f"{tpath}.tool_calls[{j}]"

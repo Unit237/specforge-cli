@@ -277,7 +277,15 @@ def _write_rollout(path: Path, *, sid: str, cwd: Path) -> None:
             f.write(json.dumps(row) + "\n")
 
 
-def _write_codex_state(home: Path, *, sid: str, title: str, cwd: Path, rollout: Path) -> None:
+def _write_codex_state(
+    home: Path,
+    *,
+    sid: str,
+    title: str,
+    cwd: Path,
+    rollout: Path,
+    model: str = "gpt-5.5",
+) -> None:
     db = home / "state_5.sqlite"
     con = sqlite3.connect(db)
     con.execute(
@@ -306,7 +314,7 @@ def _write_codex_state(home: Path, *, sid: str, title: str, cwd: Path, rollout: 
             cwd, title, sandbox_policy, approval_mode, archived, updated_at_ms, model
         ) VALUES (?, ?, 1, 1, 'vscode', 'openai', ?, ?, '', '', 0, ?, ?)
         """,
-        (sid, str(rollout), str(cwd), title, 1778227200000, "gpt-5.5"),
+        (sid, str(rollout), str(cwd), title, 1778227200000, model),
     )
     con.commit()
     con.close()
@@ -430,6 +438,78 @@ def test_codex_rollout_omits_internal_approval_review_session(
     rollout.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
     assert read_codex_rollout_session(rollout, verbose=True) is None
+
+
+def test_codex_rollout_preserves_commentary_and_final_answer_phases(
+    tmp_path: Path,
+) -> None:
+    rollout = tmp_path / "phases.jsonl"
+    rows = [
+        {
+            "timestamp": "2026-08-15T01:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "phase-session", "cwd": str(tmp_path)},
+        },
+        {
+            "timestamp": "2026-08-15T01:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Ship it."},
+        },
+        {
+            "timestamp": "2026-08-15T01:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "Deploying now."}],
+            },
+        },
+        {
+            "timestamp": "2026-08-15T01:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Deployed."}],
+            },
+        },
+    ]
+    rollout.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    session = read_codex_rollout_session(rollout, verbose=True)
+
+    assert session is not None
+    assert [turn.phase for turn in session.turns] == [
+        None,
+        "commentary",
+        "final_answer",
+    ]
+
+
+def test_list_recent_codex_sessions_omits_internal_approval_review(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "codex"
+    home.mkdir()
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    rollout = home / "approval.jsonl"
+    _write_rollout(rollout, sid="approval", cwd=bundle)
+    _write_codex_state(
+        home,
+        sid="approval",
+        title="The following is the Codex agent history [/ -]",
+        cwd=bundle,
+        rollout=rollout,
+        model="codex-auto-review",
+    )
+    monkeypatch.setenv("CODEX_CLI_HOME", str(home))
+
+    assert list_recent_codex_sessions(bundle) == []
 
 
 def test_list_recent_codex_sessions_from_state_db(tmp_path: Path, monkeypatch) -> None:

@@ -530,6 +530,51 @@ def test_show_tool_runs_compact_still_renders_tool_calls(monkeypatch):
     assert "x.py" in out
 
 
+def test_codex_phases_and_chat_title_have_distinct_text_labels(monkeypatch):
+    """Prompts, progress, and conclusions must be distinguishable without
+    relying on color, and every interleaved row must name its Codex chat.
+    """
+    import spec_cli.realtime.notifier as notifier_mod
+
+    cap = _recording_console()
+    monkeypatch.setattr(notifier_mod, "console", cap)
+    update = _ev(role="assistant", text="Still running the release gate.")
+    update.phase = "commentary"
+    update.title = "Improve ICP-driven next actions"
+    answer = _ev(role="assistant", text="The release is deployed.")
+    answer.id += 1
+    answer.phase = "final_answer"
+    answer.title = update.title
+
+    n = Notifier(critic_enabled=False)
+    n.show(update)
+    n.show(answer)
+    out = cap.export_text()
+
+    assert "UPDATE" in out
+    assert "progress for" in out
+    assert "ANSWER" in out
+    assert "answer to" in out
+    assert out.count("Improve ICP-driven next actions") == 2
+
+
+def test_transport_close_and_safe_tool_only_rows_are_not_rendered(monkeypatch):
+    import spec_cli.realtime.notifier as notifier_mod
+
+    cap = _recording_console()
+    monkeypatch.setattr(notifier_mod, "console", cap)
+    close = _ev(role="assistant_closed", text=None)
+    tool_only = _ev(role="assistant", text=None)
+    tool_only.summary = "ran 2 tools: Read app.py, Bash pytest"
+    tool_only.tool_calls = [ToolCallPayload(name="Read", args={"path": "app.py"})]
+
+    n = Notifier(critic_enabled=False)
+    n.show(close)
+    n.show(tool_only)
+
+    assert cap.export_text() == ""
+
+
 def test_show_completed_pair_renders_paired_banner(monkeypatch):
     """``show_completed_pair`` is the second-pass Q/A bundle for team watch."""
     import spec_cli.realtime.notifier as notifier_mod

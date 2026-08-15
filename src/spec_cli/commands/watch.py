@@ -121,7 +121,7 @@ def _resolve_watch_project(
         "grouped digest (``Edit ×2``, ``Bash ×1``, ``Read ×4``), and keep "
         "fenced code blocks in the prose "
         "intact instead of collapsing them to ``[code: lang ~N lines]``. "
-        "Off by default — the default pane shows full AI narration "
+        "Off by default — the default pane shows prompts, progress, and answers "
         "without code so concurrent threads stay scannable. The auto-critic "
         "still inspects every tool call regardless of this flag."
     ),
@@ -197,6 +197,10 @@ def watch_cmd(
     event out over a workspace SSE stream. Your foreground watcher renders
     every conversation you author; accepted teammates render every conversation
     authored by one another, all within a few seconds.
+
+    Rows carry their chat title. ``USER`` marks a human prompt, ``UPDATE``
+    marks Codex progress commentary, and ``ANSWER`` marks its human-facing
+    conclusion. Internal reasoning and transport frames are not rendered.
 
     Broadcasting follows ``cloud.prompt_stream`` in spec.yaml (default ON).
     Use ``spec live off`` / ``spec live mute`` to opt out. Receiving teammate

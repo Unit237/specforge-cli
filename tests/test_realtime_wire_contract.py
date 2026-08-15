@@ -11,6 +11,7 @@ def test_outgoing_event_clips_untrusted_adapter_metadata() -> None:
         branch="b" * 300,
         commit_sha="c" * 300,
         model="m" * 300,
+        phase="final_answer",
         summary="u" * 3000,
         text="t" * (512 * 1024 + 10),
         title="A Codex prompt title " + "x" * 400,
@@ -28,6 +29,7 @@ def test_outgoing_event_clips_untrusted_adapter_metadata() -> None:
     assert len(payload["branch"]) == 255
     assert len(payload["commit_sha"]) == 128
     assert len(payload["model"]) == 128
+    assert payload["phase"] == "final_answer"
     assert len(payload["summary"]) == 2000
     assert len(payload["text"]) == 512 * 1024
     assert len(payload["title"]) == 200
@@ -54,3 +56,19 @@ def test_incoming_workspace_event_accepts_null_project_id() -> None:
 
     assert event.project_id == 0
     assert event.bundle_label == "workspace"
+
+
+def test_incoming_event_preserves_assistant_phase() -> None:
+    event = IncomingEvent.from_json(
+        {
+            "id": 42,
+            "project_id": 1,
+            "session_id": "codex-session",
+            "source": "codex",
+            "role": "assistant",
+            "phase": "commentary",
+            "author": {"user_id": 7, "name": "Maya"},
+        }
+    )
+
+    assert event.phase == "commentary"
