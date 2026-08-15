@@ -35,9 +35,10 @@ class _FastEnqueueConsumer:
     def __init__(self, events: list) -> None:
         self._events = list(events)
         self._stop = threading.Event()
+        self.resume_ids: list[int | None] = []
 
-    def set_resume_cursor(self, _last_id) -> None:  # type: ignore[no-untyped-def]
-        pass
+    def set_resume_cursor(self, last_id) -> None:  # type: ignore[no-untyped-def]
+        self.resume_ids.append(last_id)
 
     def stop(self) -> None:
         self._stop.set()
@@ -194,6 +195,7 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
     assert consumer_calls[0][1]["workspace"] is True
     assert consumer_calls[0][1]["include_presence"] is True
     assert "project_id" not in consumer_calls[0][1]
+    assert consumer.resume_ids == []
     assert presence_apply_calls == []
     board = json.loads(
         (tmp_path / ".spec" / "team-coordination.json").read_text(encoding="utf-8")

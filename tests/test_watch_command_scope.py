@@ -80,11 +80,19 @@ def test_foreground_watch_reuses_background_producer(monkeypatch, tmp_path) -> N
         lambda _root, opts: captured.append(opts) or 0,
     )
 
-    result = CliRunner().invoke(cli, ["watch", "--no-bootstrap"])
+    result = CliRunner().invoke(cli, ["watch"])
 
     assert result.exit_code == 0, result.output
     assert "workspace feed across all bundles" in result.output
     assert len(captured) == 1
     assert captured[0].receive is True
     assert captured[0].broadcast is False
+    assert captured[0].bootstrap_receive is False
     assert captured[0].persist_cursor is False
+
+    captured.clear()
+    result = CliRunner().invoke(cli, ["watch", "--bootstrap"])
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].bootstrap_receive is True

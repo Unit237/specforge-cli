@@ -7,8 +7,9 @@ Two pieces of state, both persisted under ``<bundle>/.spec/live-cursor.json``:
   how many turns of it have we already broadcast. Stops the watcher
   from re-broadcasting on restart.
 * **Consumer cursor** — the highest ``id`` we have ever received from
-  the SSE stream. Sent as ``Last-Event-ID`` on reconnect so the server
-  can replay anything missed.
+  the SSE stream. Used across invocations only by the explicit
+  ``spec watch --bootstrap`` history mode. A consumer still tracks its
+  in-memory id during a live run so network reconnects cannot miss events.
 
 The file is plain JSON written atomically (write to ``.tmp`` then
 rename) so a power loss can never corrupt it. Reads are tolerant —
