@@ -70,15 +70,39 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
         )
         for i in (1, 2, 3)
     ]
-    # The first frame is this install's own SSE echo. It should stay out of
-    # terminal output while still contributing to the shared coordination
-    # projection.
+    events.append(
+        evmod.IncomingEvent(
+            id=4,
+            project_id=2,
+            session_id="presence-other-project",
+            source="cursor",
+            role="presence",
+            branch="main",
+            commit_sha=None,
+            model=None,
+            summary=None,
+            text=None,
+            title=None,
+            cwd=str(tmp_path),
+            paths_touched=[],
+            turn_at=evmod.datetime.now(evmod.timezone.utc),
+            received_at=evmod.datetime.now(evmod.timezone.utc),
+            author_user_id=2,
+            author_handle="bob",
+            author_name="Bob",
+            author_avatar_url=None,
+        )
+    )
+    # The first frame is this install's own SSE echo. Solo users must see it
+    # in the workspace feed as well as in the coordination projection.
     events[0].author_user_id = 1
     events[0].author_handle = "alice"
     events[0].author_name = "Alice"
     events[0].broadcast_client_id = "local-install"
     consumer = _FastEnqueueConsumer(events)
     notifier = _BlockingNotifier()
+    consumer_calls: list[tuple[tuple, dict]] = []
+    presence_apply_calls: list[int] = []
 
     monkeypatch.setattr(
         "spec_cli.realtime.watcher.Notifier",
@@ -88,9 +112,13 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
         "spec_cli.realtime.watcher.HTTPPoster",
         lambda *a, **kw: None,
     )
+    def _consumer_factory(*args, **kwargs):  # type: ignore[no-untyped-def]
+        consumer_calls.append((args, kwargs))
+        return consumer
+
     monkeypatch.setattr(
         "spec_cli.realtime.watcher.SSEConsumer",
-        lambda *a, **kw: consumer,
+        _consumer_factory,
     )
 
     def _run_consumer(c, on_event, on_fatal, **kw):  # type: ignore[no-untyped-def]
@@ -126,6 +154,10 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "spec_cli.realtime.watcher.TeamPresenceMirror.write", lambda *a, **k: None
     )
+    monkeypatch.setattr(
+        "spec_cli.realtime.watcher.PresenceCache.apply_event",
+        lambda _self, event: presence_apply_calls.append(event.id) or False,
+    )
 
     stop = threading.Event()
 
@@ -157,7 +189,12 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
 
     run_watcher(tmp_path, opts, stop_event=stop)
 
-    assert notifier.show_calls == [2, 3]
+    assert notifier.show_calls == [1, 2, 3]
+    assert consumer_calls
+    assert consumer_calls[0][1]["workspace"] is True
+    assert consumer_calls[0][1]["include_presence"] is True
+    assert "project_id" not in consumer_calls[0][1]
+    assert presence_apply_calls == []
     board = json.loads(
         (tmp_path / ".spec" / "team-coordination.json").read_text(encoding="utf-8")
     )

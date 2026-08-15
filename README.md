@@ -304,7 +304,7 @@ spec live on        # re-enable for this bundle (with --verbose for full assista
 | `spec on` | Start-of-workday switch: unmute sharing, enable autostart, prune missing registrations, and start every known local bundle watcher. Safe to repeat. |
 | `spec off` | End-of-workday switch: disable new automatic starts, gracefully stop every known watcher, and release leftover local edit locks. Cloud-side jobs are configured separately. |
 | `spec status` | Machine-wide ON/OFF + watcher summary, followed by the current bundle's staging status when run inside a bundle. Works outside a bundle. |
-| `spec watch` | Long-running daemon. Broadcasts your prompts + dirty files; renders teammates' in your terminal. `--mirror` also writes incoming events to `prompts/captured/peers/<handle>/`. |
+| `spec watch` | Long-running daemon. Broadcasts your prompts + dirty files and tails the workspace stream: all of your own conversations plus every conversation authored by an accepted teammate. `--mirror` also writes incoming peer events to `prompts/captured/peers/<handle>/`. |
 | `spec team` | Snapshot of recent prompt activity (no SSE). |
 | `spec team watch` | Live workspace-wide SSE tail (`GET /api/me/prompt-stream`). **Default (non-compact) layout:** user bodies up to the schema wire cap; **assistant prose in each finished turn** is the merged stored body (same cap as `spec watch`), with fenced code collapsed to `[code: lang ~N lines]` unless you pass **`--show-tool-runs`**, which also lists structured tool calls and preserves code blocks. A **`● turn complete`** footer still points to **`/turn`** / **`/full`** for pager drill-in (whole thread, structured tools, or re-fetch from Cloud — see [docs/team-watch-slash-commands.md](docs/team-watch-slash-commands.md)). Headers: USER / AI / ERROR, source, branch, bundle, time; chip row: `cwd`, `touched`, color **`session`** id. Flags include `--compact`, `--no-verbose`, `--no-critic`, `--no-commands`, `--no-heartbeat`, `--show-tool-runs`, `--notify`. |
 | `spec team flag <event_id>` | Flag a teammate's prompt event (`warning` / `question` / `block` / `ack`) in near real time. The flag fans out over the same SSE channel so every connected watcher sees it within an RTT. |
@@ -391,10 +391,13 @@ exit-code probe that hooks call before write tools (`Edit` / `Write` /
 array alongside the per-path holders. Cross-branch divergence is intentionally
 ignored — only same-branch ahead-of-you is treated as a "git pull first" signal.
 
-**Workspace-wide live tail:** `spec team watch` opens one SSE connection to
-`GET /api/me/prompt-stream` (every bundle you can read on Cloud, with
-`bundle_label` on each event). `spec watch` in a repo still tails that bundle
-only and can broadcast your local turns.
+**Workspace-wide live tail:** `spec watch`, `spec activity`, and
+`spec team watch` open `GET /api/me/prompt-stream`. The feed includes every
+conversation you authored plus every conversation authored by an accepted
+teammate; unrelated users remain limited to bundles they can already read.
+Each project-bound event carries `bundle_label`, while repository-neutral
+events carry the `workspace` label. The repo-local watcher still routes and
+broadcasts local turns for its registered bundle.
 
 When `spec watch` isn't running, `team-presence.json` is missing → all three
 vectors **fail open** (exit 0, silent). We never block work because the daemon
