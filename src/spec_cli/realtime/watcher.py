@@ -1260,6 +1260,18 @@ def _iter_local_sessions(paths) -> Iterable[Session]:  # type: ignore[no-untyped
         except CompressError as e:
             log.debug("spec-live: compress adapter skipped: %s", e)
 
+    # Codex forks can expose several rollout files with the same logical
+    # session id. They cannot share one cursor safely: a short fork would move
+    # the horizon behind the complete transcript and make old turns look new.
+    # Consolidate once at the adapter boundary and keep the most complete view.
+    by_identity: dict[tuple[str, str], Session] = {}
+    for session in sessions:
+        key = (session.source, session.id)
+        current = by_identity.get(key)
+        if current is None or len(session.turns) > len(current.turns):
+            by_identity[key] = session
+    sessions = list(by_identity.values())
+
     epoch = datetime.min.replace(tzinfo=timezone.utc)
 
     def _recency_key(s: Session) -> datetime:
