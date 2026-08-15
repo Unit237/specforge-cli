@@ -14,6 +14,7 @@ until the bundle exists in Cloud.
 from __future__ import annotations
 
 import os
+import time
 
 import click
 
@@ -38,6 +39,33 @@ from ..realtime import (
     write_pid_file,
 )
 from ..ui import dim, fatal, info, ok, warn
+
+
+_WATCH_CLOUD_RETRY_BASE_SECS = 5.0
+_WATCH_CLOUD_RETRY_MAX_SECS = 60.0
+
+
+def _resolve_watch_project(
+    client: CloudClient,
+    handle: str,
+    slug: str,
+    *,
+    keep_waiting: bool,
+) -> dict:
+    """Resolve a watch target, keeping background daemons alive through outages."""
+    delay = _WATCH_CLOUD_RETRY_BASE_SECS
+    while True:
+        try:
+            return client.resolve_project(handle, slug)
+        except ApiError as exc:
+            if not keep_waiting or not exc.transient:
+                raise
+            warn(
+                f"Spec Cloud is temporarily unavailable ({exc}); watcher remains "
+                f"alive and will retry in {delay:.0f}s."
+            )
+            time.sleep(delay)
+            delay = min(_WATCH_CLOUD_RETRY_MAX_SECS, delay * 2.0)
 
 
 @click.command("watch")
@@ -222,6 +250,18 @@ def watch_cmd(
             dim("  stop with `spec live stop` · status: `spec live status`")
         return
 
+    # ``spec on`` may already own this bundle's producer. A foreground
+    # ``spec watch`` is then just the visible workspace pane; starting a
+    # second producer would race the same cursor and duplicate local POSTs.
+    foreground_daemon = None if background_runner else is_running(root)
+    if foreground_daemon is not None and no_receive:
+        fatal(
+            f"Background watcher pid {foreground_daemon.pid} already broadcasts "
+            "this bundle. Stop it with `spec live stop` before starting a "
+            "foreground broadcast-only watcher."
+        )
+        return
+
     # For the spawned daemon, claim the PID file *before* manifest/API
     # work. ``start_in_background`` polls for this file — if we only
     # wrote it after ``resolve_project``, slow networks would exceed the
@@ -270,7 +310,12 @@ def watch_cmd(
             fatal(str(e))
             return
         try:
-            project_info = client.resolve_project(handle, slug)
+            project_info = _resolve_watch_project(
+                client,
+                handle,
+                slug,
+                keep_waiting=background_runner,
+            )
         except ApiError as e:
             fatal(
                 f"Could not resolve project '{handle}/{slug}': {e}\n"
@@ -316,9 +361,25 @@ def watch_cmd(
         broadcast_requested = not no_broadcast
         project_opted_in = manifest.prompt_stream_enabled
         user_muted = prefs.prompt_stream_muted
-        broadcast_active = broadcast_requested and project_opted_in and not user_muted
+        broadcast_active = (
+            broadcast_requested
+            and project_opted_in
+            and not user_muted
+            and foreground_daemon is None
+        )
 
-        if broadcast_requested and not project_opted_in:
+        if (
+            foreground_daemon is not None
+            and broadcast_requested
+            and project_opted_in
+            and not user_muted
+        ):
+            info(
+                f"background watcher pid {foreground_daemon.pid} already broadcasts "
+                f"{handle}/{slug}; this foreground pane receives the workspace "
+                "feed across all bundles without duplicating local events."
+            )
+        elif broadcast_requested and not project_opted_in:
             warn(
                 "broadcasting is disabled for this bundle — run `spec live on` "
                 "(or set `cloud.prompt_stream: enabled` in spec.yaml) to share "
@@ -352,6 +413,7 @@ def watch_cmd(
             broadcast=broadcast_active,
             receive=not no_receive,
             bootstrap_receive=not no_bootstrap and not no_receive,
+            persist_cursor=foreground_daemon is None,
             mirror=mirror,
             # Presence shares the same gates as prompt broadcasting so a
             # user who muted Spec Live doesn't unintentionally start

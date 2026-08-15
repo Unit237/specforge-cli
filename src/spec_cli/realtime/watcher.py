@@ -66,7 +66,7 @@ from .coordination import CoordinationCache, TeamCoordinationMirror
 from .events import OutgoingEvent, ToolCallPayload
 from .live_event_dedup import LivePromptEventDeduper
 from .mirror import PeerMirror
-from .notifier import Notifier
+from .notifier import Notifier, WORKSPACE_FEED_LABEL
 from .presence import (
     PRESENCE_FRESHNESS_SECS,
     LocalPresence,
@@ -285,6 +285,10 @@ class WatcherOptions:
     # When True (default), fetch the latest visible workspace prompt rows over
     # REST before opening the SSE tail so the pane shows recent activity.
     bootstrap_receive: bool = True
+    # A foreground workspace viewer may overlap a background broadcaster for
+    # this bundle. In that case the daemon exclusively owns the shared cursor
+    # file and the viewer keeps its receive position in memory only.
+    persist_cursor: bool = True
     user_agent: str = field(
         default_factory=lambda: "spec-cli/live"
     )
@@ -492,8 +496,8 @@ def run_watcher(
             bundle_root
         )
 
-    baselined = _establish_live_baseline(cursor, bundle_root)
-    if baselined and opts.broadcast:
+    baselined = _establish_live_baseline(cursor, bundle_root) if opts.broadcast else 0
+    if baselined:
         dim(
             "Spec Live baseline · "
             f"skipped {baselined} existing local session(s); watching new turns"
@@ -706,7 +710,7 @@ def run_watcher(
             if resume is not None:
                 consumer.set_resume_cursor(resume)
 
-        notifier.announce_connected(opts.project_label)
+        notifier.announce_connected(WORKSPACE_FEED_LABEL)
 
         consumer_thread = run_consumer_in_thread(
             consumer, on_event=_on_event, on_fatal=_on_fatal
@@ -812,7 +816,10 @@ def run_watcher(
                 team_coordination.sync(coordination_cache)
                 last_team_presence_tick = now
 
-            if now - last_save >= CURSOR_SAVE_INTERVAL_SECS:
+            if (
+                opts.persist_cursor
+                and now - last_save >= CURSOR_SAVE_INTERVAL_SECS
+            ):
                 cursor.save()
                 last_save = now
 
@@ -857,7 +864,8 @@ def run_watcher(
                 )
             except Exception:  # noqa: BLE001
                 pass
-        cursor.save()
+        if opts.persist_cursor:
+            cursor.save()
         if poster is not None:
             poster.close()
         if workspace_poster is not None:

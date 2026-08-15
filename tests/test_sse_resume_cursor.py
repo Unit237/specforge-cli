@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from spec_cli.realtime.transport import SSEConsumer
+import requests
+import pytest
+
+from spec_cli.realtime.transport import SSEConsumer, SSEStreamError
 
 
 def _minimal_turn_payload(*, event_id: int) -> str:
@@ -52,3 +55,55 @@ def test_last_event_id_advances_only_after_yield_returns() -> None:
         consumer.stop()
         list(gen)
         assert consumer._last_event_id == 11  # noqa: SLF001
+
+
+def test_transient_http_failure_reconnects_instead_of_ending_watcher() -> None:
+    consumer = SSEConsumer(
+        api_base="http://example.invalid",
+        access_token="t",
+        workspace=True,
+    )
+    consumer._retry_delay = 0  # noqa: SLF001
+
+    unavailable = MagicMock()
+    unavailable.status_code = 502
+    unavailable.text = "Bad Gateway"
+
+    recovered = MagicMock()
+    recovered.status_code = 200
+    recovered.iter_lines.return_value = iter(
+        [
+            "id: 12",
+            "event: turn",
+            f"data: {_minimal_turn_payload(event_id=12)}",
+            "",
+        ]
+    )
+
+    with patch(
+        "spec_cli.realtime.transport.requests.get",
+        side_effect=[unavailable, recovered],
+    ) as get:
+        gen = consumer.stream()
+        assert next(gen).id == 12
+        consumer.stop()
+        list(gen)
+
+    assert get.call_count == 2
+    assert unavailable.close.called
+
+
+def test_auth_failure_remains_fatal() -> None:
+    consumer = SSEConsumer(
+        api_base="http://example.invalid",
+        access_token="t",
+        workspace=True,
+    )
+    denied = MagicMock()
+    denied.status_code = 401
+
+    with patch("spec_cli.realtime.transport.requests.get", return_value=denied):
+        with pytest.raises(SSEStreamError) as caught:
+            list(consumer.stream())
+
+    assert not isinstance(caught.value, requests.RequestException)

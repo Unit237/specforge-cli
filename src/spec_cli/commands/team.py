@@ -61,7 +61,7 @@ from ..realtime.critic import (
 )
 from ..realtime.events import IncomingEvent, IncomingFlag
 from ..realtime.merge_turns import merge_assistant_snapshots
-from ..realtime.notifier import Notifier
+from ..realtime.notifier import Notifier, WORKSPACE_FEED_LABEL
 from ..realtime.team_push_requests import (
     DEFAULT_PUSH_REQUEST_TTL_SECS,
     record_push_request,
@@ -1243,7 +1243,7 @@ def team_watch_cmd(
         # First successful handshake — print the "connected" banner
         # only now, so auth failures stay silent on stdout and the
         # user sees the real error from the SSE consumer instead.
-        notifier.announce_connected("workspace (all bundles)")
+        notifier.announce_connected(WORKSPACE_FEED_LABEL)
         if commands_enabled:
             notifier.show_command_result(
                 "interactive commands enabled — type /help for the list. "

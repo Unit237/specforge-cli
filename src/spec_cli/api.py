@@ -8,6 +8,7 @@ slug and returns JSON. CLI commands layer the UX on top.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable
 from urllib.parse import quote
@@ -15,15 +16,24 @@ from urllib.parse import quote
 import requests
 
 from .config import Credentials
+from .http_retry import is_transient_http_status, short_retry_delay
 
 DEFAULT_TIMEOUT = 30
 
 
 class ApiError(RuntimeError):
-    def __init__(self, message: str, status: int | None = None, body: Any = None):
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        body: Any = None,
+        *,
+        transient: bool = False,
+    ):
         super().__init__(message)
         self.status = status
         self.body = body
+        self.transient = transient
 
 
 @dataclass
@@ -57,10 +67,26 @@ class CloudClient:
 
     def _request(self, method: str, path: str, **kw: Any) -> Any:
         kw.setdefault("timeout", DEFAULT_TIMEOUT)
-        try:
-            r = self._s.request(method, self._url(path), **kw)
-        except requests.RequestException as e:
-            raise ApiError(f"Network error talking to Cloud: {e}") from e
+        method = method.upper()
+        max_attempts = 4 if method in {"GET", "HEAD", "OPTIONS"} else 1
+        for attempt in range(max_attempts):
+            try:
+                r = self._s.request(method, self._url(path), **kw)
+            except requests.RequestException as e:
+                if attempt + 1 < max_attempts:
+                    time.sleep(short_retry_delay(attempt))
+                    continue
+                raise ApiError(
+                    f"Network error talking to Cloud: {e}", transient=True
+                ) from e
+
+            if (
+                is_transient_http_status(r.status_code)
+                and attempt + 1 < max_attempts
+            ):
+                time.sleep(short_retry_delay(attempt))
+                continue
+            break
 
         if r.status_code >= 400:
             try:
@@ -73,6 +99,7 @@ class CloudClient:
                 f"Cloud API {method} {path} → {r.status_code}: {detail}",
                 status=r.status_code,
                 body=body,
+                transient=is_transient_http_status(r.status_code),
             )
 
         if r.status_code == 204 or not r.content:
