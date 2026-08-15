@@ -92,7 +92,7 @@ def _session_from_payload(
     payload: dict[str, Any],
     *,
     path: Path,
-    roots: list[Path],
+    roots: list[Path] | None,
     verbose: bool,
 ) -> Session | None:
     session_id = payload.get("session_id")
@@ -103,7 +103,9 @@ def _session_from_payload(
     if not isinstance(cwd, str) or not Path(cwd).expanduser().is_absolute():
         return None
     workspace = Path(cwd).expanduser().resolve()
-    if not any(path_intersects_bundle(workspace, root.resolve()) for root in roots):
+    if roots is not None and not any(
+        path_intersects_bundle(workspace, root.resolve()) for root in roots
+    ):
         return None
     if not isinstance(messages, list):
         return None
@@ -164,13 +166,19 @@ def _session_from_payload(
 
 
 def read_compress_sessions(
-    bundle_paths: Path | Iterable[Path],
+    bundle_paths: Path | Iterable[Path] | None,
     *,
     since: datetime | None = None,
     verbose: bool = False,
 ) -> Iterable[Session]:
-    roots = [bundle_paths] if isinstance(bundle_paths, Path) else list(bundle_paths)
-    if not roots:
+    roots: list[Path] | None = (
+        None
+        if bundle_paths is None
+        else [bundle_paths]
+        if isinstance(bundle_paths, Path)
+        else list(bundle_paths)
+    )
+    if roots == []:
         return  # type: ignore[return-value]
     store = compress_session_store_root()
     if not store.is_dir():
@@ -193,7 +201,12 @@ def read_compress_sessions(
             continue
         if session is None or session.id in yielded:
             continue
-        if since is not None and session.started_at is not None and session.started_at < since:
+        activity_at = (
+            _parse_dt(payload.get("updated_at"))
+            or session.ended_at
+            or session.started_at
+        )
+        if since is not None and activity_at is not None and activity_at < since:
             continue
         yielded.add(session.id)
         yield session

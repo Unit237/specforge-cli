@@ -584,12 +584,18 @@ def _codex_state_db(home: Path | None = None) -> Path:
 
 
 def list_recent_codex_sessions(
-    bundle_paths: Path | Iterable[Path],
+    bundle_paths: Path | Iterable[Path] | None,
     *,
     limit: int = 20,
 ) -> list[CodexRecentSession]:
-    """Return recent Codex Desktop chats whose cwd intersects this bundle."""
-    roots: list[Path] = [bundle_paths] if isinstance(bundle_paths, Path) else list(bundle_paths)
+    """Return recent Codex chats in scope, or every chat when scope is ``None``."""
+    roots: list[Path] | None = (
+        None
+        if bundle_paths is None
+        else [bundle_paths]
+        if isinstance(bundle_paths, Path)
+        else list(bundle_paths)
+    )
     db = _codex_state_db()
     if not db.is_file():
         return []
@@ -624,7 +630,9 @@ def list_recent_codex_sessions(
         path = Path(rollout_path).expanduser()
         if not path.is_file():
             continue
-        if not _path_intersects_bundle(cwd if isinstance(cwd, str) else None, roots):
+        if roots is not None and not _path_intersects_bundle(
+            cwd if isinstance(cwd, str) else None, roots
+        ):
             continue
         updated = _parse_timestamp(updated_ms)
         turn_count = _count_codex_rollout_turns(path)
@@ -677,10 +685,18 @@ def read_codex_rollout_session(
     )
 
 
-def _project_dir_candidates(bundle_paths: Iterable[Path]) -> list[tuple[Path, Path]]:
+def _project_dir_candidates(
+    bundle_paths: Iterable[Path] | None,
+) -> list[tuple[Path, Path]]:
     root = codex_store_root()
     if not root.is_dir():
         return []
+    if bundle_paths is None:
+        return [
+            (child, Path("/"))
+            for child in sorted(root.iterdir())
+            if child.is_dir()
+        ]
     resolved_roots = [p.resolve() for p in bundle_paths]
     if not resolved_roots:
         return []
@@ -820,7 +836,7 @@ def _build_session(path: Path, *, cwd: Path, verbose: bool) -> Session | None:
 
 
 def iter_cursor_agent_transcript_sessions(
-    bundle_paths: Path | Iterable[Path],
+    bundle_paths: Path | Iterable[Path] | None,
     *,
     since: datetime | None = None,
     verbose: bool = False,
@@ -832,8 +848,14 @@ def iter_cursor_agent_transcript_sessions(
     that path is now owned here so ``source`` is consistently ``cursor`` and
     :func:`read_cursor_sessions` can merge them with Composer data.
     """
-    roots: list[Path] = [bundle_paths] if isinstance(bundle_paths, Path) else list(bundle_paths)
-    if not roots:
+    roots: list[Path] | None = (
+        None
+        if bundle_paths is None
+        else [bundle_paths]
+        if isinstance(bundle_paths, Path)
+        else list(bundle_paths)
+    )
+    if roots == []:
         return  # type: ignore[return-value]
     yielded: set[str] = set()
     candidates = _project_dir_candidates(roots)
@@ -850,6 +872,15 @@ def iter_cursor_agent_transcript_sessions(
             path = session_dir / f"{session_dir.name}.jsonl"
             if not path.is_file():
                 continue
+            if since is not None:
+                try:
+                    modified = datetime.fromtimestamp(
+                        path.stat().st_mtime, tz=timezone.utc
+                    )
+                except OSError:
+                    modified = None
+                if modified is not None and modified < since:
+                    continue
             if path.stem in yielded:
                 continue
             try:
@@ -858,26 +889,33 @@ def iter_cursor_agent_transcript_sessions(
                 raise CodexError(f"{path.name}: could not build session — {e}") from e
             if session is None:
                 continue
-            if since is not None and session.started_at is not None and session.started_at < since:
+            activity_at = session.ended_at or session.started_at
+            if since is not None and activity_at is not None and activity_at < since:
                 continue
             yielded.add(session.id)
             yield session
 
 
 def read_codex_sessions(
-    bundle_paths: Path | Iterable[Path],
+    bundle_paths: Path | Iterable[Path] | None,
     *,
     since: datetime | None = None,
     verbose: bool = False,
 ) -> Iterable[Session]:
-    """Yield OpenAI Codex Desktop rollout sessions for the current bundle.
+    """Yield OpenAI Codex Desktop rollouts for a bundle or the whole machine.
 
     Cursor in-editor Agent JSONL lives under ``~/.cursor/projects/`` — use
     :func:`read_cursor_sessions` (which calls :func:`iter_cursor_agent_transcript_sessions`)
     so those threads are labeled ``source=cursor`` and merged with Composer.
     """
-    roots: list[Path] = [bundle_paths] if isinstance(bundle_paths, Path) else list(bundle_paths)
-    if not roots:
+    roots: list[Path] | None = (
+        None
+        if bundle_paths is None
+        else [bundle_paths]
+        if isinstance(bundle_paths, Path)
+        else list(bundle_paths)
+    )
+    if roots == []:
         return  # type: ignore[return-value]
     yielded: set[str] = set()
 
@@ -898,7 +936,8 @@ def read_codex_sessions(
             ) from e
         if session is None:
             continue
-        if since is not None and session.started_at is not None and session.started_at < since:
+        activity_at = session.ended_at or session.started_at
+        if since is not None and activity_at is not None and activity_at < since:
             continue
         yielded.add(session.id)
         yield session

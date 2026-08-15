@@ -104,6 +104,32 @@ def test_read_sessions_extracts_user_and_assistant_turns(tmp_path, monkeypatch):
     assert call.args == {"pattern": "calculate_tax", "path": "billing/"}
 
 
+def test_machine_wide_read_includes_session_outside_bundle(tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    session_id = "machine-wide-claude"
+    _make_fake_store(
+        tmp_path,
+        outside,
+        session_id,
+        [
+            {
+                "type": "user",
+                "cwd": str(outside),
+                "sessionId": session_id,
+                "timestamp": "2026-03-10T11:47:12Z",
+                "message": {"role": "user", "content": "Plan outside a repo"},
+            }
+        ],
+    )
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
+
+    sessions = list(read_claude_code_sessions(None))
+
+    assert [session.id for session in sessions] == [session_id]
+    assert sessions[0].cwd == str(outside)
+
+
 def test_read_sessions_skips_sidechain_and_tool_result_rows(tmp_path, monkeypatch):
     bundle = tmp_path / "bundle"
     bundle.mkdir()

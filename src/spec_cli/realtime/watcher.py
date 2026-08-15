@@ -4,9 +4,10 @@ The ``spec watch`` orchestrator: producer + consumer.
 Two threads on top of a shared ``LiveCursor``:
 
 * **Producer** — every ``poll_interval`` seconds, scans local Cursor /
-  Codex / Claude Code / Compress transcripts for the bundle, finds turns that
-  haven't been broadcast yet (per the cursor), redacts them, and POSTs
-  one event per new turn to ``/api/projects/{id}/prompt-events``.
+  Codex / Claude Code / Compress transcripts, finds turns that haven't been
+  broadcast yet (per the cursor), redacts them, and POSTs one event per new
+  turn. Under ``spec on`` exactly one watcher owns a machine-wide scan and the
+  workspace endpoint; direct legacy watches remain project-scoped.
 
 * **Consumer** — holds an SSE connection on
   ``/api/projects/{id}/prompt-stream``. For each event yielded:
@@ -29,9 +30,9 @@ import signal
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 from ..api import ApiError, CloudClient
 from ..git import read_git_context
@@ -90,6 +91,10 @@ log = logging.getLogger(__name__)
 # the sweet spot in practice: short enough to feel "live" (worst-case
 # 2s + network RTT), long enough that a quiet bundle costs ~nothing.
 DEFAULT_POLL_INTERVAL_SECS = 2.0
+# A resumed old chat updates its local activity timestamp and re-enters this
+# window. Limiting machine scans to active history avoids reparsing years of
+# dormant Cursor conversations every two seconds.
+MACHINE_SESSION_LOOKBACK = timedelta(days=2)
 # Presence broadcasts are far less urgent than prompt turns — git diff
 # every 15s is enough for "Alice is in auth.py" to feel instant
 # without spamming the wire while a teammate is mid-typing. The cache
@@ -266,6 +271,11 @@ class WatcherOptions:
     poll_interval: float = DEFAULT_POLL_INTERVAL_SECS
     presence_interval: float = DEFAULT_PRESENCE_INTERVAL_SECS
     broadcast: bool = True
+    # Prompt production is owned by exactly one boundary. ``machine`` is the
+    # watcher elected by ``spec on`` and scans every local agent store into
+    # the workspace endpoint. Other registered watchers use ``none`` and keep
+    # repository presence only. ``project`` preserves direct/legacy watches.
+    prompt_scope: Literal["project", "machine", "none"] = "project"
     receive: bool = True
     mirror: bool = False
     presence_enabled: bool = True
@@ -352,14 +362,25 @@ def build_watch_bootstrap_events(
     return ordered
 
 
-def _spec_live_startup_snapshot(bundle_root: Path) -> None:
+def _spec_live_startup_snapshot(
+    bundle_root: Path, *, machine_wide: bool = False
+) -> None:
     """One-time human-readable scan of local agent stores.
 
     When broadcasting is on but every adapter shows zero mapped
     sessions, the team feed stays quiet — this line is the fastest
     way to spot a Cursor workspace-path mismatch or a missing install.
     """
-    paths = historical_bundle_paths(bundle_root)
+    paths = None if machine_wide else historical_bundle_paths(bundle_root)
+    since = (
+        datetime.now(timezone.utc) - MACHINE_SESSION_LOOKBACK
+        if machine_wide
+        else None
+    )
+
+    def _visible(sessions: Iterable[Session]) -> Iterable[Session]:
+        return sessions if paths is None else _scoped_sessions(sessions, paths)
+
     bits: list[str] = []
     n_cursor = -1
     n_claude = -1
@@ -380,13 +401,14 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
                 n_cursor = sum(
                     1
                     for _ in itertools.islice(
-                        _scoped_sessions(
-                            read_cursor_sessions(paths, verbose=True), paths
+                        _visible(
+                            read_cursor_sessions(paths, since=since, verbose=True)
                         ),
                         400,
                     )
                 )
-                bits.append(f"cursor: {n_cursor} composer session(s) for this bundle")
+                scope = "on this machine" if machine_wide else "for this bundle"
+                bits.append(f"cursor: {n_cursor} composer session(s) {scope}")
             except CursorError as e:
                 n_cursor = -2
                 bits.append("cursor: read error")
@@ -397,11 +419,10 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
             n_claude = sum(
                 1
                 for _ in itertools.islice(
-                    _scoped_sessions(
+                    _visible(
                         read_claude_code_sessions(
-                            paths, since=None, verbose=True
+                            paths, since=since, verbose=True
                         ),
-                        paths,
                     ),
                     400,
                 )
@@ -419,9 +440,8 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
             n_codex = sum(
                 1
                 for _ in itertools.islice(
-                    _scoped_sessions(
-                        read_codex_sessions(paths, since=None, verbose=True),
-                        paths,
+                    _visible(
+                        read_codex_sessions(paths, since=since, verbose=True),
                     ),
                     400,
                 )
@@ -439,9 +459,8 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
             n_compress = sum(
                 1
                 for _ in itertools.islice(
-                    _scoped_sessions(
-                        read_compress_sessions(paths, since=None, verbose=True),
-                        paths,
+                    _visible(
+                        read_compress_sessions(paths, since=since, verbose=True),
                     ),
                     400,
                 )
@@ -455,11 +474,14 @@ def _spec_live_startup_snapshot(bundle_root: Path) -> None:
         bits.append("compress: store not found")
 
     dim("Spec Live broadcast · local scan — " + " · ".join(bits))
-    dim(
-        "Tip: only Cursor Composer / in-editor Agent sessions in this folder "
-        "are scanned (workspaceStorage). The sidebar Chat panel often lives "
-        "elsewhere — use Agent tied to this repo to see turns in team watch."
-    )
+    if machine_wide:
+        dim("Spec Live machine broadcaster · every supported local agent session is scanned.")
+    else:
+        dim(
+            "Tip: only Cursor Composer / in-editor Agent sessions in this folder "
+            "are scanned (workspaceStorage). The sidebar Chat panel often lives "
+            "elsewhere — run `spec on` for machine-wide broadcasting."
+        )
     if (
         n_cursor >= 0
         and n_claude >= 0
@@ -503,7 +525,15 @@ def run_watcher(
             bundle_root
         )
 
-    baselined = _establish_live_baseline(cursor, bundle_root) if opts.broadcast else 0
+    produces_prompts = opts.broadcast and opts.prompt_scope != "none"
+    machine_wide = opts.prompt_scope == "machine"
+    baselined = (
+        _establish_live_baseline(
+            cursor, bundle_root, machine_wide=machine_wide
+        )
+        if produces_prompts
+        else 0
+    )
     if baselined:
         dim(
             "Spec Live baseline · "
@@ -524,8 +554,12 @@ def run_watcher(
     if not opts.broadcast:
         notifier.announce_broadcast_disabled()
     else:
-        _spec_live_startup_snapshot(bundle_root)
-        emit_live_doctor_warnings(bundle_root, watcher_running_here=True)
+        if produces_prompts:
+            _spec_live_startup_snapshot(
+                bundle_root, machine_wide=machine_wide
+            )
+        if not machine_wide:
+            emit_live_doctor_warnings(bundle_root, watcher_running_here=True)
 
     if stop_event is None:
         stop_event = threading.Event()
@@ -749,7 +783,7 @@ def run_watcher(
             if opts.receive:
                 _drain_incoming()
             tick_started = time.monotonic()
-            if poster is not None:
+            if poster is not None and produces_prompts:
                 try:
                     posted = _producer_tick(
                         bundle_root=bundle_root,
@@ -760,6 +794,7 @@ def run_watcher(
                         stop_event=stop_event,
                         assistant_tail_holds=assistant_tail_holds,
                         last_assistant_cloud_ids=last_assistant_cloud_ids,
+                        machine_wide=machine_wide,
                     )
                     if posted > 0:
                         last_prompt_post_mono = time.monotonic()
@@ -769,8 +804,9 @@ def run_watcher(
             now = time.monotonic()
 
             if (
-                opts.broadcast
+                produces_prompts
                 and poster is not None
+                and not machine_wide
                 and now - last_prompt_post_mono >= QUIET_PROMPT_POST_SECS
                 and now - last_doctor_mono >= QUIET_PROMPT_POST_SECS
             ):
@@ -993,12 +1029,13 @@ def _producer_tick(
     stop_event: threading.Event,
     assistant_tail_holds: dict[str, _AssistantTailHold] | None = None,
     last_assistant_cloud_ids: dict[str, int] | None = None,
+    machine_wide: bool = False,
 ) -> int:
     """One pass over local transcripts; broadcast new turns.
 
     Returns the number of prompt turns successfully POSTed this tick.
 
-    Sessions come from Cursor, Claude Code, and Codex adapters in
+    Sessions come from Cursor, Claude Code, Codex, and Compress adapters in
     ``_iter_local_sessions`` — tail-assistant streaming and empty-tail
     retry rules apply to every ``session.source``; there is no
     source-specific branch in the POST path.
@@ -1017,9 +1054,11 @@ def _producer_tick(
     posted_count = 0
     if stop_event.is_set():
         return posted_count
-    git = read_git_context(bundle_root)
-    branch = git.branch or "detached"
+    git = None if machine_wide else read_git_context(bundle_root)
+    branch = None if machine_wide else git.branch or "detached"
     if (
+        not machine_wide
+        and
         opts.project_branch_filter
         and opts.project_branch_filter != branch
     ):
@@ -1030,10 +1069,19 @@ def _producer_tick(
         last_assistant_cloud_ids if last_assistant_cloud_ids is not None else {}
     )
 
-    for session in _iter_local_sessions(paths):
+    session_scope = None if machine_wide else paths
+    session_since = (
+        opts.started_at - MACHINE_SESSION_LOOKBACK if machine_wide else None
+    )
+    sessions = (
+        _iter_local_sessions(session_scope, since=session_since)
+        if session_since is not None
+        else _iter_local_sessions(session_scope)
+    )
+    for session in sessions:
         if stop_event.is_set():
             return posted_count
-        route = _session_route(session, paths)
+        route = "workspace" if machine_wide else _session_route(session, paths)
         session_poster = workspace_poster if route == "workspace" else poster
         if session_poster is None:
             continue
@@ -1043,10 +1091,19 @@ def _producer_tick(
             cursor.producer_baseline_version >= PRODUCER_BASELINE_VERSION
             and not cursor.has_session(session.id)
         ):
-            observed_at = session.started_at or session.ended_at
-            if observed_at is None or _as_utc(observed_at) < opts.started_at:
+            first_live_turn = next(
+                (
+                    index
+                    for index, turn in enumerate(session.turns)
+                    if turn.at is not None
+                    and _as_utc(turn.at) >= opts.started_at
+                ),
+                None,
+            )
+            if first_live_turn is None:
                 cursor.record_broadcast(session.id, len(session.turns))
                 continue
+            cursor.record_broadcast(session.id, first_live_turn)
         prev = cursor.turns_broadcast_for(session.id)
         # Cursor (and other adapters) can shrink on-disk turn lists while
         # our cursor still counts empty skips we advanced past without a
@@ -1202,11 +1259,27 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _establish_live_baseline(cursor: LiveCursor, bundle_root: Path) -> int:
+def _establish_live_baseline(
+    cursor: LiveCursor,
+    bundle_root: Path,
+    *,
+    machine_wide: bool = False,
+) -> int:
     """Mark existing transcript turns as seen before opening the live tail."""
     count = 0
     paths = historical_bundle_paths(bundle_root)
-    for session in _iter_local_sessions(paths):
+    session_scope = None if machine_wide else paths
+    session_since = (
+        datetime.now(timezone.utc) - MACHINE_SESSION_LOOKBACK
+        if machine_wide
+        else None
+    )
+    sessions = (
+        _iter_local_sessions(session_scope, since=session_since)
+        if session_since is not None
+        else _iter_local_sessions(session_scope)
+    )
+    for session in sessions:
         # Re-establish this boundary on every process start. Turns appended
         # while Spec was stopped are history relative to this join and must
         # not trickle into the live feed after restart.
@@ -1217,8 +1290,15 @@ def _establish_live_baseline(cursor: LiveCursor, bundle_root: Path) -> int:
     return count
 
 
-def _iter_local_sessions(paths) -> Iterable[Session]:  # type: ignore[no-untyped-def]
+def _iter_local_sessions(
+    paths,
+    *,
+    since: datetime | None = None,
+) -> Iterable[Session]:  # type: ignore[no-untyped-def]
     """Yield freshly-read local sessions across all four adapters.
+
+    ``paths=None`` is the machine-wide source contract used only by the one
+    ``spec on`` owner; an iterable preserves repository-scoped capture.
 
     Each adapter is gated on its store existing — we never error out
     when one isn't installed. ``verbose=True`` ensures assistant turn
@@ -1235,27 +1315,27 @@ def _iter_local_sessions(paths) -> Iterable[Session]:  # type: ignore[no-untyped
     if claude_code_store_root().exists():
         try:
             sessions.extend(
-                read_claude_code_sessions(paths, since=None, verbose=True)
+                read_claude_code_sessions(paths, since=since, verbose=True)
             )
         except ClaudeCodeError as e:
             log.debug("spec-live: claude_code adapter skipped: %s", e)
 
     if cursor_workspace_storage_root().exists():
         try:
-            sessions.extend(read_cursor_sessions(paths, since=None, verbose=True))
+            sessions.extend(read_cursor_sessions(paths, since=since, verbose=True))
         except CursorError as e:
             log.debug("spec-live: cursor adapter skipped: %s", e)
 
     if codex_transcript_store_available():
         try:
-            sessions.extend(read_codex_sessions(paths, since=None, verbose=True))
+            sessions.extend(read_codex_sessions(paths, since=since, verbose=True))
         except CodexError as e:
             log.debug("spec-live: codex adapter skipped: %s", e)
 
     if compress_session_store_root().exists():
         try:
             sessions.extend(
-                read_compress_sessions(paths, since=None, verbose=True)
+                read_compress_sessions(paths, since=since, verbose=True)
             )
         except CompressError as e:
             log.debug("spec-live: compress adapter skipped: %s", e)
@@ -1278,7 +1358,10 @@ def _iter_local_sessions(paths) -> Iterable[Session]:  # type: ignore[no-untyped
         return s.ended_at or s.started_at or epoch
 
     sessions.sort(key=_recency_key, reverse=True)
-    yield from _scoped_sessions(sessions, paths)
+    if paths is None:
+        yield from sessions
+    else:
+        yield from _scoped_sessions(sessions, paths)
 
 
 def _scoped_sessions(

@@ -444,17 +444,17 @@ def _session_belongs_to_any(
 
 
 def read_claude_code_sessions(
-    bundle_paths: Path | Iterable[Path],
+    bundle_paths: Path | Iterable[Path] | None,
     *,
     since: datetime | None = None,
     verbose: bool = False,
 ) -> Iterable[Session]:
     """Yield every Claude Code session captured for the given bundle.
 
-    Accepts either a single bundle root (the common case) or an
-    iterable of roots — current location plus every historical path
-    the bundle has lived at. Pass the iterable form when you want
-    rename-resilient discovery; the typical caller is ``prompts
+    Accepts a single bundle root (the common case), an iterable of roots —
+    current location plus every historical path the bundle has lived at — or
+    ``None`` for the single machine-wide live broadcaster. Pass the iterable
+    form when you want rename-resilient discovery; the typical caller is ``prompts
     capture``, which routes through ``stage.historical_bundle_paths``
     so a moved bundle still finds its old sessions (Fix #2).
 
@@ -465,17 +465,20 @@ def read_claude_code_sessions(
     any session whose recorded ``cwd`` is outside every recorded root
     (defense-in-depth against Claude Code's lossy path encoding).
 
-    ``since`` filters by session ``started_at``; callers use it for
+    ``since`` filters by the session's latest observed activity; callers use it for
     incremental sync. Sessions with the same id across multiple roots
     are de-duplicated within a single read (the same UUID file under
     two different bundle paths only yields once).
     """
+    machine_wide = bundle_paths is None
     roots: list[Path] = (
-        [bundle_paths]
+        []
+        if bundle_paths is None
+        else [bundle_paths]
         if isinstance(bundle_paths, Path)
         else list(bundle_paths)
     )
-    if not roots:
+    if not machine_wide and not roots:
         return  # type: ignore[return-value]
 
     # Collect candidate dirs across every root, remembering which exact
@@ -483,9 +486,16 @@ def read_claude_code_sessions(
     # per-root rather than per-set.
     exact_names: set[str] = {encode_bundle_path(r) for r in roots}
     seen_dirs: dict[Path, None] = {}
-    for r in roots:
-        for d in _session_dir_candidates(r):
-            seen_dirs.setdefault(d, None)
+    if machine_wide:
+        store = claude_code_store_root()
+        if store.is_dir():
+            for child in sorted(store.iterdir()):
+                if child.is_dir():
+                    seen_dirs.setdefault(child, None)
+    else:
+        for r in roots:
+            for d in _session_dir_candidates(r):
+                seen_dirs.setdefault(d, None)
     if not seen_dirs:
         return  # type: ignore[return-value]
 
@@ -517,12 +527,13 @@ def read_claude_code_sessions(
                 continue
             if session.id in yielded_ids:
                 continue
-            if not _session_belongs_to_any(
+            if not machine_wide and not _session_belongs_to_any(
                 session, resolved_roots, strict_cwd=strict
             ):
                 continue
-            if since is not None and session.started_at is not None:
-                if session.started_at < since:
+            activity_at = session.ended_at or session.started_at
+            if since is not None and activity_at is not None:
+                if activity_at < since:
                     continue
             yielded_ids.add(session.id)
             yield session

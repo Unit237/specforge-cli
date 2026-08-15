@@ -531,6 +531,31 @@ def test_list_recent_codex_sessions_from_state_db(tmp_path: Path, monkeypatch) -
     assert recent[0].turn_count == 2
 
 
+def test_machine_wide_codex_read_includes_session_outside_bundle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "codex"
+    home.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sid = "019e2222-2222-7222-9222-222222222222"
+    rollout = home / "sessions" / "2026" / "05" / "08" / "outside.jsonl"
+    _write_rollout(rollout, sid=sid, cwd=outside)
+    _write_codex_state(
+        home,
+        sid=sid,
+        title="Chat outside Spec",
+        cwd=outside,
+        rollout=rollout,
+    )
+    monkeypatch.setenv("CODEX_CLI_HOME", str(home))
+
+    sessions = list(read_codex_sessions(None, verbose=True))
+
+    assert [session.id for session in sessions] == [sid]
+    assert sessions[0].cwd == str(outside)
+
+
 def test_read_codex_sessions_includes_codex_desktop_rollouts(
     tmp_path: Path, monkeypatch
 ) -> None:
