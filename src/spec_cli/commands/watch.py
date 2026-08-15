@@ -1,5 +1,5 @@
 """
-``spec watch`` — Spec Live daemon (broadcast + receive teammates' prompts).
+``spec watch`` — Spec Live daemon (broadcast + receive workspace prompts).
 
 Foreground long-running command; ^C / SIGTERM stop it cleanly. Designed
 to be run in a dedicated terminal pane alongside an editor — output is
@@ -162,16 +162,17 @@ def watch_cmd(
     background: bool,
     background_runner: bool,
 ) -> None:
-    """Stream prompts to and from your team in real time.
+    """Stream visible workspace prompts in real time.
 
     For each new turn in any local Cursor / Codex / Claude Code / Compress session,
     Spec Live POSTs a redacted event to Spec Cloud. Cloud fans the
-    event out over an SSE stream to every teammate's `spec watch`
-    daemon, which renders it in their terminal within a few seconds.
+    event out over a workspace SSE stream. Your foreground watcher renders
+    every conversation you author; accepted teammates render every conversation
+    authored by one another, all within a few seconds.
 
     Broadcasting follows ``cloud.prompt_stream`` in spec.yaml (default ON).
     Use ``spec live off`` / ``spec live mute`` to opt out. Receiving teammate
-    events is always available to project members. Use `--mirror`
+    events is always available under the Cloud workspace visibility rule. Use `--mirror`
     to also drop incoming peer events into a local file you can grep.
 
     By default this runs in the foreground; pass `--background` to

@@ -282,8 +282,8 @@ class WatcherOptions:
     # by default so the pane shows prose narration only.
     show_tool_runs: bool = False
     project_branch_filter: str | None = None
-    # When True (default), fetch the latest project prompt rows over REST
-    # before opening the SSE tail so the pane shows recent teammate activity.
+    # When True (default), fetch the latest visible workspace prompt rows over
+    # REST before opening the SSE tail so the pane shows recent activity.
     bootstrap_receive: bool = True
     user_agent: str = field(
         default_factory=lambda: "spec-cli/live"
@@ -306,11 +306,10 @@ def _watch_bootstrap_limit() -> int:
 
 def build_watch_bootstrap_events(
     client: CloudClient,
-    project_id: int,
     *,
     limit: int | None = None,
 ) -> list[IncomingEvent]:
-    """Recent prompt rows for this project, oldest-first, for startup replay.
+    """Recent visible workspace prompt rows, oldest-first, for startup replay.
 
     Skips ``presence`` rows (noisy git pings). Fetches extra rows then
     keeps the newest ``limit`` by monotonic ``id``.
@@ -320,7 +319,7 @@ def build_watch_bootstrap_events(
         return []
     fetch = min(max(cap * 2, cap), 200)
     try:
-        rows = client.list_prompt_events(project_id, limit=fetch)
+        rows = client.list_my_prompt_events(limit=fetch)
     except ApiError:
         return []
     by_id: dict[int, IncomingEvent] = {}
@@ -607,7 +606,12 @@ def run_watcher(
 
     if opts.receive:
         consumer = SSEConsumer(
-            opts.api_base, opts.access_token, opts.project_id, user_agent=opts.user_agent
+            opts.api_base,
+            opts.access_token,
+            workspace=True,
+            include_presence=True,
+            verbose=opts.verbose_assistant,
+            user_agent=opts.user_agent,
         )
         consumer.set_resume_cursor(cursor.last_received_id)
 
@@ -622,23 +626,18 @@ def run_watcher(
             try:
                 if _live_ev_dedup.is_redelivery(event.id):
                     return
-                # Materialize every prompt event, including this install's
-                # echoes, before terminal echo suppression. The coordination
-                # brief is a project view; hiding our own parallel sessions
-                # there would defeat its purpose.
+                # Materialize and render every visible prompt event, including
+                # this install's own echo. A solo user's workspace feed is
+                # still useful, and suppressing that echo made ``spec watch``
+                # look empty when nobody else was on the account.
                 if coordination_cache.apply_event(event):
                     team_coordination.sync(coordination_cache)
-                if opts.self_user_id is not None and (
-                    event.author_user_id == opts.self_user_id
-                ):
-                    # Skip only this install's echoes (same bearer + same client id).
-                    # Missing ``broadcast_client_id`` on the wire means we cannot
-                    # tell another machine from a legacy echo — prefer showing the row.
-                    local_bid = (opts.broadcast_client_id or "").strip()
-                    wire_bid = (event.broadcast_client_id or "").strip()
-                    if wire_bid and local_bid and wire_bid == local_bid:
-                        return
                 if event.role == "presence":
+                    # Conversation turns are workspace-wide, but dirty-file
+                    # presence is a repository safety boundary. Never project
+                    # another bundle's ``auth.py`` into this bundle's mirror.
+                    if event.project_id != opts.project_id:
+                        return
                     # Presence updates land in the cache (and trigger a
                     # mirror rewrite below); we do NOT print them to the
                     # terminal — the dirty file list churns too much for
@@ -693,7 +692,7 @@ def run_watcher(
                 hist = CloudClient(
                     api_base=opts.api_base, access_token=opts.access_token
                 )
-                boot = build_watch_bootstrap_events(hist, opts.project_id)
+                boot = build_watch_bootstrap_events(hist)
             except Exception:  # noqa: BLE001
                 boot = []
             if boot:

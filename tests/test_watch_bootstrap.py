@@ -9,7 +9,7 @@ from spec_cli.realtime.watcher import build_watch_bootstrap_events
 
 def test_build_watch_bootstrap_skips_presence_and_sorts_ascending() -> None:
     client = MagicMock()
-    client.list_prompt_events.return_value = [
+    client.list_my_prompt_events.return_value = [
         {"id": 3, "role": "presence", "project_id": 1, "session_id": "s"},
         {
             "id": 2,
@@ -30,6 +30,7 @@ def test_build_watch_bootstrap_skips_presence_and_sorts_ascending() -> None:
             "author": {"user_id": 1, "handle": "a", "name": "A"},
         },
     ]
-    events = build_watch_bootstrap_events(client, 1, limit=10)
+    events = build_watch_bootstrap_events(client, limit=10)
     assert [e.id for e in events] == [1, 2]
     assert all(e.role != "presence" for e in events)
+    client.list_my_prompt_events.assert_called_once_with(limit=20)

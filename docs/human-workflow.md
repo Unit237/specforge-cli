@@ -34,8 +34,11 @@ streams only later turns, preventing a historical replay storm. Historical
 capture remains an explicit `spec prompts capture` action.
 
 `spec activity` is the existing workspace-wide team stream under a shorter
-name. It includes local Codex, Claude Code, Cursor, and Compress sessions. Tool
-calls are still inspected by the critic when collapsed.
+name. `spec watch` consumes the same Cloud workspace stream. A solo user sees
+all of their own local Codex, Claude Code, Cursor, and Compress sessions;
+accepted teammates see all sessions authored by one another. Unrelated users
+remain limited to conversations in bundles they can already read. Tool calls
+are still inspected by the critic when collapsed.
 
 `spec prs` uses the signed-in GitHub CLI identity and deduplicates GitHub origins
 across registered bundles. `spec review --with cloud` adds the explicit
