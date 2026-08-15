@@ -48,6 +48,48 @@ def test_iter_local_sessions_newest_first(monkeypatch, tmp_path: Path) -> None:
     assert ids == ["cursor-new", "cursor-old"]
 
 
+def test_iter_local_sessions_keeps_complete_view_of_duplicate_identity(
+    monkeypatch, tmp_path: Path
+) -> None:
+    def _fake_cursor(_paths, **kwargs):  # type: ignore[no-untyped-def]
+        yield Session(
+            id="shared",
+            source="cursor",
+            title="complete",
+            turns=[
+                Turn(role="user", text="prompt"),
+                Turn(role="assistant", text="answer"),
+            ],
+        )
+        yield Session(
+            id="shared",
+            source="cursor",
+            title="short fork",
+            turns=[Turn(role="user", text="prompt")],
+        )
+
+    monkeypatch.setattr(
+        watcher_mod,
+        "claude_code_store_root",
+        lambda: Path("/__no_such_claude_store__"),
+    )
+    monkeypatch.setattr(
+        watcher_mod,
+        "cursor_workspace_storage_root",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(watcher_mod, "read_cursor_sessions", _fake_cursor)
+    monkeypatch.setattr(
+        watcher_mod, "codex_transcript_store_available", lambda: False
+    )
+
+    sessions = list(watcher_mod._iter_local_sessions([tmp_path]))
+
+    assert len(sessions) == 1
+    assert sessions[0].title == "complete"
+    assert len(sessions[0].turns) == 2
+
+
 def test_ambiguous_parent_workspace_sessions_require_touched_bundle(
     monkeypatch, tmp_path: Path
 ) -> None:
