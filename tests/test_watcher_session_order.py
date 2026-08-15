@@ -234,4 +234,20 @@ def test_live_baseline_skips_existing_transcript_history(monkeypatch, tmp_path):
     assert count == 1
     assert cursor.turns_broadcast_for(session.id) == 2
     assert cursor.producer_baseline_version == 1
-    assert watcher_mod._establish_live_baseline(cursor, tmp_path) == 0
+
+    # Turns written while Spec was stopped are still pre-join history when a
+    # new watcher starts. Re-baseline the exact current horizon every time.
+    session.turns.extend(
+        [
+            Turn(role="user", text="prompt while stopped"),
+            Turn(role="assistant", text="answer while stopped"),
+        ]
+    )
+    assert watcher_mod._establish_live_baseline(cursor, tmp_path) == 1
+    assert cursor.turns_broadcast_for(session.id) == 4
+
+    # Parser compaction can also shrink a transcript between starts; the join
+    # horizon follows the source instead of replaying from the old index.
+    session.turns[:] = session.turns[:1]
+    assert watcher_mod._establish_live_baseline(cursor, tmp_path) == 1
+    assert cursor.turns_broadcast_for(session.id) == 1

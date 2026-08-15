@@ -248,6 +248,19 @@ class LiveCursor:
             if turn_count < current:
                 self.broadcast_turns[session_id] = turn_count
 
+    def set_broadcast_horizon(self, session_id: str, turn_count: int) -> None:
+        """Set the exact live-join boundary for one local session.
+
+        Unlike the steady-state cursor methods, startup baselining must move
+        in either direction and must retain empty sessions. Otherwise a
+        transcript that changed while Spec was stopped can be replayed as new.
+        """
+        if turn_count < 0:
+            return
+        self.prune_posted_keys_from_index(session_id, turn_count)
+        with self._lock:
+            self.broadcast_turns[session_id] = turn_count
+
     def record_received(self, event_id: int) -> None:
         """Mark ``event_id`` as the most recent event we have processed.
 

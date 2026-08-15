@@ -1204,12 +1204,13 @@ def _as_utc(value: datetime) -> datetime:
 
 def _establish_live_baseline(cursor: LiveCursor, bundle_root: Path) -> int:
     """Mark existing transcript turns as seen before opening the live tail."""
-    if cursor.producer_baseline_version >= PRODUCER_BASELINE_VERSION:
-        return 0
     count = 0
     paths = historical_bundle_paths(bundle_root)
     for session in _iter_local_sessions(paths):
-        cursor.record_broadcast(session.id, len(session.turns))
+        # Re-establish this boundary on every process start. Turns appended
+        # while Spec was stopped are history relative to this join and must
+        # not trickle into the live feed after restart.
+        cursor.set_broadcast_horizon(session.id, len(session.turns))
         count += 1
     cursor.mark_producer_baseline()
     cursor.save()
