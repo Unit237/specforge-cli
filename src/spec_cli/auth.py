@@ -120,7 +120,7 @@ def poll_for_token(
                 json={"device_code": code.device_code},
                 timeout=30,
             )
-        except requests.RequestException as e:
+        except requests.RequestException:
             # Transient — could be flaky network, server restart. Don't
             # bail on the user; just keep polling until the device code
             # itself expires.
