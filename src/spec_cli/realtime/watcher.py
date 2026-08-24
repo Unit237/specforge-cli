@@ -633,7 +633,11 @@ def run_watcher(
     # tools read), but broadcasting only fires when both
     # ``presence_enabled`` and ``broadcast`` are true so the user's
     # opt-out flags reach this path.
-    presence_cache = PresenceCache(freshness_secs=PRESENCE_FRESHNESS_SECS)
+    presence_cache = PresenceCache(
+        freshness_secs=PRESENCE_FRESHNESS_SECS,
+        self_user_id=opts.self_user_id,
+        self_broadcast_client_id=opts.broadcast_client_id,
+    )
     team_presence = TeamPresenceMirror(bundle_root)
     coordination_cache = CoordinationCache(bundle_root)
     team_coordination = TeamCoordinationMirror(bundle_root)

@@ -23,6 +23,7 @@ def _event(
     summary: str | None = None,
     paths: list[str] | None = None,
     tools: list[ToolCallPayload] | None = None,
+    phase: str | None = None,
     closes_event_id: int | None = None,
     seconds: int = 0,
 ) -> IncomingEvent:
@@ -36,6 +37,7 @@ def _event(
         branch="main",
         commit_sha="abc",
         model="test-model",
+        phase=phase,
         summary=summary,
         text=text,
         title="Session title",
@@ -142,6 +144,64 @@ def test_delayed_close_from_prior_generation_does_not_close_new_prompt(tmp_path)
     snapshot = cache.snapshot(now=NOW + timedelta(seconds=5))
     assert snapshot is not None
     assert snapshot["active"][0]["objective"] == "Second"
+
+
+def test_commentary_close_keeps_agent_round_active_until_final_answer(tmp_path):
+    """Codex closes each assistant bubble, including progress commentary.
+
+    A commentary bubble ending is not the task ending: the round and its path
+    claim must remain visible until Codex emits a final-answer bubble.
+    """
+    cache = CoordinationCache(tmp_path)
+    cache.apply_event(_event(1, role="user", session="a", text="Build auth"))
+    cache.apply_event(
+        _event(
+            2,
+            role="assistant",
+            session="a",
+            summary="Editing token validation",
+            paths=["src/auth.py"],
+            phase="commentary",
+            seconds=1,
+        )
+    )
+
+    assert cache.apply_event(
+        _event(
+            3,
+            role="assistant_closed",
+            session="a",
+            closes_event_id=2,
+            seconds=2,
+        )
+    )
+    snapshot = cache.snapshot(now=NOW + timedelta(seconds=3))
+    assert snapshot is not None
+    assert snapshot["active"][0]["phase"] == "commentary"
+    claim = snapshot["files_index"]["src/auth.py"][0]
+    assert claim["kind"] == "task_claim"
+    assert claim["session_id"] == "a"
+
+    cache.apply_event(
+        _event(
+            4,
+            role="assistant",
+            session="a",
+            summary="Auth complete",
+            phase="final_answer",
+            seconds=4,
+        )
+    )
+    cache.apply_event(
+        _event(
+            5,
+            role="assistant_closed",
+            session="a",
+            closes_event_id=4,
+            seconds=5,
+        )
+    )
+    assert cache.snapshot(now=NOW + timedelta(seconds=6)) is None
 
 
 def test_stale_round_expires_and_mirror_deletes_files(tmp_path):

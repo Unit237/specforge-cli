@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 TEAM_PRESENCE_FILENAME = "team-presence.json"
 TEAM_PRESENCE_DIR = ".spec"
 TEAM_PRESENCE_SCHEMA_VERSION = 1
+TEAM_PRESENCE_HEARTBEAT_SECS = 60.0
 
 
 def _team_presence_path(bundle_root: Path) -> Path:
@@ -70,6 +71,7 @@ class TeamPresenceMirror:
         self._path = _team_presence_path(self._bundle_root)
         self._lock = threading.Lock()
         self._last_payload: str | None = None
+        self._last_write_at: datetime | None = None
 
     @property
     def path(self) -> Path:
@@ -83,6 +85,7 @@ class TeamPresenceMirror:
         self_handle: str | None,
         self_name: str | None,
         branch: str | None,
+        now: datetime | None = None,
     ) -> bool:
         """Render the cache + local presence into a single JSON file.
 
@@ -91,6 +94,7 @@ class TeamPresenceMirror:
         on failure logs and returns ``False`` without disturbing the
         existing file.
         """
+        rendered_at = now or datetime.now(timezone.utc)
         peers = cache.current()
         body = _render(
             peers=peers,
@@ -98,6 +102,7 @@ class TeamPresenceMirror:
             self_handle=self_handle,
             self_name=self_name,
             branch=branch,
+            now=rendered_at,
         )
         attach_push_requests_to_body(self._bundle_root, body)
 
@@ -109,7 +114,12 @@ class TeamPresenceMirror:
         body_for_equality = {k: v for k, v in body.items() if k != "updated_at"}
         equality_key = json.dumps(body_for_equality, sort_keys=True)
         with self._lock:
-            if equality_key == self._last_payload:
+            if (
+                equality_key == self._last_payload
+                and self._last_write_at is not None
+                and (rendered_at - self._last_write_at).total_seconds()
+                < TEAM_PRESENCE_HEARTBEAT_SECS
+            ):
                 return False
             encoded = json.dumps(body, indent=2, sort_keys=True)
             try:
@@ -149,6 +159,7 @@ class TeamPresenceMirror:
             ):
                 log.info("spec-live: team-editing-brief write skipped")
             self._last_payload = equality_key
+            self._last_write_at = rendered_at
             return True
 
 
@@ -159,6 +170,7 @@ def _render(
     self_handle: str | None,
     self_name: str | None,
     branch: str | None,
+    now: datetime,
 ) -> dict:
     """Build the ``team-presence.json`` body.
 
@@ -204,6 +216,7 @@ def _render(
     for peer in peers:
         member = {
             "user_id": peer.user_id,
+            "broadcast_client_id": peer.broadcast_client_id,
             "handle": peer.handle,
             "name": peer.name,
             "branch": peer.branch,
@@ -271,7 +284,7 @@ def _render(
 
     return {
         "schema": TEAM_PRESENCE_SCHEMA_VERSION,
-        "updated_at": _iso(datetime.now(timezone.utc)),
+        "updated_at": _iso(now),
         "self": self_block,
         "members": members_block,
         "files_index": files_index,
@@ -320,6 +333,7 @@ __all__ = [
     "TEAM_PRESENCE_DIR",
     "TEAM_PRESENCE_FILENAME",
     "TEAM_PRESENCE_SCHEMA_VERSION",
+    "TEAM_PRESENCE_HEARTBEAT_SECS",
     "TeamPresenceMirror",
     "read_team_presence",
 ]

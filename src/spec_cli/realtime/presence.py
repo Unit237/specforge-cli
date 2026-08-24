@@ -309,7 +309,7 @@ def _fingerprint(files: list[PresenceFile], head: str | None) -> str:
 class PeerPresence:
     """The latest known presence for one teammate.
 
-    Indexed in ``PresenceCache`` by ``user_id``. ``last_seen`` is the
+    Indexed in ``PresenceCache`` by user and installation. ``last_seen`` is the
     time we received the event, used to expire stale entries; the
     server's freshness window is the source of truth, but we apply
     the same window locally so a flapping connection doesn't show
@@ -317,6 +317,7 @@ class PeerPresence:
     """
 
     user_id: int
+    broadcast_client_id: str | None
     handle: str | None
     name: str
     avatar_url: str | None
@@ -328,7 +329,7 @@ class PeerPresence:
 
 
 class PresenceCache:
-    """Thread-safe cache of "who's editing what" indexed by user_id.
+    """Thread-safe cache of "who's editing what" per installation.
 
     The receiver thread calls :meth:`apply_event` whenever a presence
     event lands; the watcher's snapshot writer (``team-presence.json``)
@@ -339,10 +340,16 @@ class PresenceCache:
     """
 
     def __init__(
-        self, *, freshness_secs: int = PRESENCE_FRESHNESS_SECS
+        self,
+        *,
+        freshness_secs: int = PRESENCE_FRESHNESS_SECS,
+        self_user_id: int | None = None,
+        self_broadcast_client_id: str | None = None,
     ) -> None:
         self._freshness = timedelta(seconds=freshness_secs)
-        self._by_user: dict[int, PeerPresence] = {}
+        self._self_user_id = self_user_id
+        self._self_broadcast_client_id = self_broadcast_client_id
+        self._by_install: dict[tuple[int, str], PeerPresence] = {}
         self._lock = threading.Lock()
 
     def apply_event(self, event: IncomingEvent) -> bool:
@@ -356,11 +363,22 @@ class PresenceCache:
             return False
         if event.author_user_id <= 0:
             return False
+        if (
+            self._self_user_id is not None
+            and event.author_user_id == self._self_user_id
+            and self._self_broadcast_client_id
+            and event.broadcast_client_id == self._self_broadcast_client_id
+        ):
+            # Workspace SSE intentionally echoes this install's own events.
+            # Local state is rendered separately as ``self``; caching the echo
+            # as a peer creates a false teammate conflict.
+            return False
         payload = event.presence
         if payload is None:
             return False
         peer = PeerPresence(
             user_id=event.author_user_id,
+            broadcast_client_id=event.broadcast_client_id,
             handle=event.author_handle,
             name=event.author_name,
             avatar_url=event.author_avatar_url,
@@ -370,8 +388,12 @@ class PresenceCache:
             is_clean=payload.is_clean,
             last_seen=event.received_at or datetime.now(timezone.utc),
         )
+        install_key = (
+            peer.user_id,
+            peer.broadcast_client_id or "legacy",
+        )
         with self._lock:
-            existing = self._by_user.get(peer.user_id)
+            existing = self._by_install.get(install_key)
             # Out-of-order delivery is rare on SSE, but possible after
             # a reconnect-driven replay. Keep the newest by wall clock.
             if existing is not None and existing.last_seen > peer.last_seen:
@@ -381,9 +403,9 @@ class PresenceCache:
                 # longer editing anything"; drop them from the cache
                 # so the rendered list is just the actively-editing
                 # teammates.
-                self._by_user.pop(peer.user_id, None)
+                self._by_install.pop(install_key, None)
                 return existing is not None
-            self._by_user[peer.user_id] = peer
+            self._by_install[install_key] = peer
             return True
 
     def expire_stale(self) -> int:
@@ -394,9 +416,9 @@ class PresenceCache:
         partition or a peer's laptop sleeping."""
         cutoff = datetime.now(timezone.utc) - self._freshness
         with self._lock:
-            stale = [uid for uid, p in self._by_user.items() if p.last_seen < cutoff]
-            for uid in stale:
-                self._by_user.pop(uid, None)
+            stale = [key for key, p in self._by_install.items() if p.last_seen < cutoff]
+            for key in stale:
+                self._by_install.pop(key, None)
             return len(stale)
 
     def current(self) -> list[PeerPresence]:
@@ -405,7 +427,7 @@ class PresenceCache:
         renders first."""
         self.expire_stale()
         with self._lock:
-            peers = list(self._by_user.values())
+            peers = list(self._by_install.values())
         peers.sort(key=lambda p: p.last_seen, reverse=True)
         return peers
 
@@ -414,13 +436,13 @@ class PresenceCache:
         the server's authoritative ``GET /presence`` snapshot. Any
         local rows older than the snapshot are discarded."""
         with self._lock:
-            self._by_user.clear()
+            self._by_install.clear()
         for evt in events:
             self.apply_event(evt)
 
     def __len__(self) -> int:
         with self._lock:
-            return len(self._by_user)
+            return len(self._by_install)
 
 
 __all__ = [

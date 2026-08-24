@@ -157,6 +157,7 @@ class AgentRound:
     branch: str | None
     cwd: str | None
     model: str | None
+    phase: str | None
     objective: str
     started_at: datetime
     updated_at: datetime
@@ -187,6 +188,7 @@ class AgentRound:
             "branch": self.branch,
             "cwd": self.cwd,
             "model": self.model,
+            "phase": self.phase,
             "objective": self.objective,
             "status": self.status,
             "progress": self.progress,
@@ -251,6 +253,7 @@ class CoordinationCache:
                     branch=event.branch,
                     cwd=event.cwd,
                     model=event.model,
+                    phase=event.phase,
                     objective=objective,
                     started_at=_utc(event.turn_at or event.received_at),
                     updated_at=at,
@@ -277,6 +280,7 @@ class CoordinationCache:
                     branch=event.branch,
                     cwd=event.cwd,
                     model=event.model,
+                    phase=event.phase,
                     objective=_compact_text(event.title, MAX_OBJECTIVE_CHARS)
                     or "(earlier prompt outside replay window)",
                     started_at=_utc(event.turn_at or event.received_at),
@@ -304,6 +308,7 @@ class CoordinationCache:
             current.branch = event.branch or current.branch
             current.cwd = event.cwd or current.cwd
             current.model = event.model or current.model
+            current.phase = event.phase or current.phase
             current.progress = _progress_text(event) or current.progress
             if event.role == "assistant":
                 current.last_assistant_event_id = event.id
@@ -316,6 +321,15 @@ class CoordinationCache:
             for tool in event.tool_calls or []:
                 if tool.name not in current.tools and len(current.tools) < MAX_TOOL_NAMES:
                     current.tools.append(tool.name)
+
+            # Codex emits ``assistant_closed`` after each stable assistant
+            # bubble, including progress commentary between tool calls. That
+            # is a transport boundary, not a task boundary. Keep the round and
+            # its claimed paths active until a final-answer bubble closes.
+            if event.role == "assistant_closed" and current.phase == "commentary":
+                self._changed_at = at
+                self._prune_history_locked()
+                return True
 
             if event.role in {"assistant_closed", "error"}:
                 current.status = "failed" if event.role == "error" else "completed"
@@ -359,8 +373,12 @@ class CoordinationCache:
                     files_index.setdefault(path, []).append(
                         {
                             "key": row.key,
+                            "kind": "task_claim",
                             "agent": row.source,
                             "author": row.author_display,
+                            "author_user_id": row.author_user_id,
+                            "session_id": row.session_id,
+                            "broadcast_client_id": row.broadcast_client_id,
                             "objective": row.objective,
                         }
                     )
@@ -498,11 +516,30 @@ class TeamCoordinationMirror:
             return False
 
 
+def read_team_coordination(bundle_root: Path) -> dict[str, Any] | None:
+    """Read the generated task-claim projection, failing safely on absence.
+
+    The file is intentionally ephemeral, so ``None`` means either no active
+    rounds or unavailable coordination data. Callers combine it with the
+    always-present team-presence health signal before deciding whether a path
+    is truly clear.
+    """
+    path = bundle_root.resolve() / ".spec" / COORDINATION_JSON_FILENAME
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(body, dict) or body.get("schema") != COORDINATION_SCHEMA:
+        return None
+    return body
+
+
 __all__ = [
     "COORDINATION_JSON_FILENAME",
     "COORDINATION_MD_FILENAME",
     "COORDINATION_SCHEMA",
     "CoordinationCache",
     "TeamCoordinationMirror",
+    "read_team_coordination",
     "render_coordination_markdown",
 ]
