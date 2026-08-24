@@ -50,11 +50,8 @@ from ..realtime.active_edits import (
     DEFAULT_LOCK_TTL_SECS,
     ActiveEditsStore,
 )
-from ..realtime.presence_mirror import read_team_presence
-from ..realtime.team_editing_brief import (
-    DEFAULT_LOCKS_MIRROR_STALE_SECS,
-    team_presence_mirror_stale,
-)
+from ..realtime.conflicts import assess_path_conflict, resolve_coordination_path
+from ..realtime.team_editing_brief import DEFAULT_LOCKS_MIRROR_STALE_SECS
 from ..ui import dim
 
 CLAUDE_HOOK_AGENT_ID = "claude_code"
@@ -173,24 +170,27 @@ def claude_pre_tool_use_cmd(block_mode: bool) -> None:
     bundle_root = _find_bundle_for_paths(file_paths)
     if bundle_root is None:
         sys.exit(0)
-    body = read_team_presence(bundle_root)
-    if body is None:
-        sys.exit(0)
-    if team_presence_mirror_stale(
-        body, max_age_secs=_locks_max_mirror_age_secs()
-    ):
-        sys.exit(0)
-
     conflicts: list[tuple[str, list[dict]]] = []
+    unknown_paths: list[str] = []
     rel_paths: list[str] = []
+    session_id = _claude_session_id(payload)
     for abs_path in file_paths:
         rel = _bundle_relative(abs_path, bundle_root)
         if rel is None:
             continue
         rel_paths.append(rel)
-        holders = _holders_for_path(body, rel)
-        if holders:
-            conflicts.append((rel, holders))
+        assessment = assess_path_conflict(
+            bundle_root,
+            rel,
+            include_active_edits=False,
+            caller_agent=CLAUDE_HOOK_AGENT_ID,
+            caller_session_id=session_id,
+            max_presence_age_secs=_locks_max_mirror_age_secs(),
+        )
+        if assessment.state == "conflict":
+            conflicts.append((rel, assessment.holders))
+        elif assessment.state == "unknown":
+            unknown_paths.append(rel)
 
     # ── single-user multi-agent lock ──────────────────────────────
     # Take an active-edit lock for this PreToolUse call so other
@@ -202,7 +202,6 @@ def claude_pre_tool_use_cmd(block_mode: bool) -> None:
     # with the same warning channel as a teammate conflict.
     active_conflicts: list[dict] = []
     lock_id: str | None = None
-    session_id = _claude_session_id(payload)
     if rel_paths:
         try:
             store = ActiveEditsStore(bundle_root)
@@ -240,13 +239,22 @@ def claude_pre_tool_use_cmd(block_mode: bool) -> None:
         sys.stderr.write(f"spec-lock-id: {lock_id}\n")
         sys.stderr.flush()
 
-    if not conflicts and not active_conflicts:
+    if unknown_paths:
+        sys.stderr.write(
+            "⚠ Spec Live: coordination state unknown for "
+            + ", ".join(unknown_paths)
+            + "; start or repair `spec watch` before treating the path as clear.\n"
+        )
+        sys.stderr.flush()
+
+    if not conflicts and not active_conflicts and not unknown_paths:
         sys.exit(0)
 
-    _emit_conflict_warning(tool_name, conflicts, active_conflicts)
+    if conflicts or active_conflicts:
+        _emit_conflict_warning(tool_name, conflicts, active_conflicts)
     if block_mode:
         # Non-zero exit blocks the tool call in Claude Code.
-        sys.exit(2)
+        sys.exit(2 if conflicts or active_conflicts else 3)
     sys.exit(0)
 
 
@@ -300,38 +308,11 @@ def _extract_file_paths(tool_name: str, tool_input: dict) -> list[str]:
 
 
 def _find_bundle_for_paths(paths: list[str]) -> Path | None:
-    """Walk up from each path looking for a Spec bundle root.
-
-    Identical algorithm to ``find_bundle_root`` but seeded at the
-    file's directory rather than ``Path.cwd()`` — Claude Code may
-    invoke the hook from a parent directory, so we have to start
-    the search from where the edits actually live.
-    """
-    from ..constants import MANIFEST_FILENAME
-
-    candidates: list[Path] = []
+    """Resolve the coordination root for Claude's first editable path."""
     for p in paths:
-        try:
-            start = Path(p).resolve()
-        except OSError:
-            continue
-        if start.is_file():
-            start = start.parent
-        elif not start.exists():
-            start = start.parent
-        if start.is_dir():
-            candidates.append(start)
-    candidates.append(Path.cwd())
-
-    for start in candidates:
-        cur = start.resolve()
-        for _ in range(64):  # bounded ascent — symlink-loop guard
-            if (cur / MANIFEST_FILENAME).is_file():
-                return cur
-            parent = cur.parent
-            if parent == cur:
-                break
-            cur = parent
+        root, _ = resolve_coordination_path(p)
+        if root is not None:
+            return root
     return None
 
 
@@ -344,23 +325,6 @@ def _bundle_relative(abs_path: str, bundle_root: Path) -> str | None:
         return str(p.relative_to(bundle_root.resolve()))
     except ValueError:
         return None
-
-
-def _holders_for_path(body: dict, rel_path: str) -> list[dict]:
-    files_index = body.get("files_index")
-    if not isinstance(files_index, dict):
-        return []
-    raw = files_index.get(rel_path)
-    if not isinstance(raw, list):
-        return []
-    out: list[dict] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("self") is True:
-            continue  # never warn the user about their own edits
-        out.append(entry)
-    return out
 
 
 def _emit_conflict_warning(
@@ -422,12 +386,19 @@ def _emit_conflict_warning(
             lines.append(f"  {rel}")
             for h in holders[:3]:
                 handle = h.get("handle") or h.get("name") or "(unknown)"
-                added = int(h.get("lines_added") or 0)
-                removed = int(h.get("lines_removed") or 0)
-                untracked = " (new file)" if h.get("untracked") else ""
-                lines.append(
-                    f"    · @{handle} (+{added}/-{removed}){untracked}"
-                )
+                if h.get("kind") == "task_claim":
+                    lines.append(
+                        f"    · {handle} ({h.get('agent') or 'agent'}, "
+                        f"session {h.get('session_id') or '-'}) — "
+                        f"{h.get('objective') or 'active task claim'}"
+                    )
+                else:
+                    added = int(h.get("lines_added") or 0)
+                    removed = int(h.get("lines_removed") or 0)
+                    untracked = " (new file)" if h.get("untracked") else ""
+                    lines.append(
+                        f"    · @{handle} (+{added}/-{removed}){untracked}"
+                    )
             if len(holders) > 3:
                 lines.append(f"    · …and {len(holders) - 3} more")
         lines.append(

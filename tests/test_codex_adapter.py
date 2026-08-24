@@ -490,6 +490,72 @@ def test_codex_rollout_preserves_commentary_and_final_answer_phases(
     ]
 
 
+def test_codex_desktop_exec_extracts_apply_patch_paths_without_patch_body(
+    tmp_path: Path,
+) -> None:
+    """Modern Codex Desktop wraps tools in one custom ``exec`` call.
+
+    Spec needs the patch headers for task claims, but must never persist the
+    patch body itself.
+    """
+    rollout = tmp_path / "custom-tools.jsonl"
+    auth = tmp_path / "src" / "auth.py"
+    tests = tmp_path / "tests" / "test_auth.py"
+    patch_js = (
+        'const patch = "*** Begin Patch\\n'
+        f'*** Update File: {auth}\\n'
+        '@@\\n-secret\\n+replacement\\n'
+        f'*** Add File: {tests}\\n'
+        '+secret patch body\\n*** End Patch";'
+    )
+    rows = [
+        {
+            "timestamp": "2026-08-24T12:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "desktop-session", "cwd": str(tmp_path)},
+        },
+        {
+            "timestamp": "2026-08-24T12:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Fix auth."},
+        },
+        {
+            "timestamp": "2026-08-24T12:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "input": patch_js,
+            },
+        },
+        {
+            "timestamp": "2026-08-24T12:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "Patch applied."}],
+            },
+        },
+    ]
+    rollout.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    session = read_codex_rollout_session(rollout, verbose=True)
+
+    assert session is not None
+    assert session.paths_touched == [str(auth), str(tests)]
+    calls = session.turns[-1].tool_calls or []
+    assert [(call.name, call.args["path"]) for call in calls] == [
+        ("Edit", str(auth)),
+        ("Write", str(tests)),
+    ]
+    assert "secret patch body" not in json.dumps([call.args for call in calls])
+
+
 def test_list_recent_codex_sessions_omits_internal_approval_review(
     tmp_path: Path, monkeypatch
 ) -> None:

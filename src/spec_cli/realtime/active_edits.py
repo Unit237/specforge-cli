@@ -69,7 +69,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 
 log = logging.getLogger(__name__)
@@ -316,7 +316,7 @@ class ActiveEditsStore:
         return [
             lock
             for lock in self.list(now=ref)
-            if rel in lock.paths
+            if any(paths_overlap(rel, held) for held in lock.paths)
         ]
 
     # ── writes ────────────────────────────────────────────────────
@@ -385,11 +385,14 @@ class ActiveEditsStore:
             ]
 
             conflicts: list[ActiveEditConflict] = []
-            requested = set(rel_paths)
             for lock in existing:
                 if not self._belongs_to_bundle(lock):
                     continue
-                overlap = sorted(set(lock.paths) & requested)
+                overlap = sorted(
+                    requested
+                    for requested in rel_paths
+                    if any(paths_overlap(requested, held) for held in lock.paths)
+                )
                 if overlap:
                     conflicts.append(
                         ActiveEditConflict(lock=lock, overlapping_paths=overlap)
@@ -685,6 +688,19 @@ def _normalize_path(raw: str) -> str:
     return s
 
 
+def paths_overlap(left: str, right: str) -> bool:
+    """Whether two normalized file or directory scopes intersect."""
+    left_path = PurePosixPath(_normalize_path(left))
+    right_path = PurePosixPath(_normalize_path(right))
+    if not str(left_path) or not str(right_path):
+        return False
+    return (
+        left_path == right_path
+        or left_path in right_path.parents
+        or right_path in left_path.parents
+    )
+
+
 def _is_same_caller(
     lock: ActiveEditLock,
     *,
@@ -807,4 +823,5 @@ __all__ = [
     "ActiveEditConflict",
     "ActiveEditLock",
     "ActiveEditsStore",
+    "paths_overlap",
 ]

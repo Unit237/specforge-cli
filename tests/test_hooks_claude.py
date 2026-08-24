@@ -102,15 +102,13 @@ def _stderr_warnings_only(raw: str) -> str:
 # ── conflict detection ─────────────────────────────────────────────
 
 
-def test_hook_exits_zero_when_no_presence_data(tmp_path):
-    """No ``team-presence.json`` → the watcher isn't running. Fail
-    open: never block edits because the daemon is off.
+def test_hook_surfaces_unknown_when_no_presence_data(tmp_path):
+    """No ``team-presence.json`` is unknown, not evidence of safety.
 
     The hook still emits a ``spec-lock-id:`` line on stderr because
     it takes a local active-edit lock regardless of the team-presence
-    state — that's the single-user multi-agent coordination signal.
-    We assert no *user-visible warning* appears, ignoring the
-    bookkeeping line.
+    state. Warn-only mode preserves edit availability while making the
+    degraded coordination state visible.
     """
     bundle = _make_bundle(tmp_path)
     target = bundle / "auth.py"
@@ -119,7 +117,24 @@ def test_hook_exits_zero_when_no_presence_data(tmp_path):
         {"tool_name": "Edit", "tool_input": {"file_path": str(target)}}
     )
     assert res.returncode == 0
-    assert _stderr_warnings_only(res.stderr) == ""
+    assert "coordination state unknown" in _stderr_warnings_only(res.stderr)
+
+
+def test_hook_block_mode_refuses_unknown_coordination_state(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    target = bundle / "auth.py"
+    target.write_text("x", encoding="utf-8")
+
+    res = _run_hook(
+        {
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(target)},
+        },
+        args=["--block"],
+    )
+
+    assert res.returncode == 3
+    assert "coordination state unknown" in _stderr_warnings_only(res.stderr)
 
 
 def test_hook_warns_on_conflict_default(tmp_path):
@@ -147,6 +162,43 @@ def test_hook_warns_on_conflict_default(tmp_path):
     assert res.returncode == 0  # warn-only
     assert "@alice" in res.stderr
     assert "auth.py" in res.stderr
+
+
+def test_hook_uses_live_task_claims(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    target = bundle / "auth.py"
+    target.write_text("x", encoding="utf-8")
+    _write_team_presence(bundle, {})
+    (bundle / ".spec" / "team-coordination.json").write_text(
+        json.dumps(
+            {
+                "schema": "spec.team-coordination/v1",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "active": [],
+                "recent_outcomes": [],
+                "files_index": {
+                    "auth.py": [
+                        {
+                            "kind": "task_claim",
+                            "agent": "codex",
+                            "author": "@alice",
+                            "session_id": "codex-a",
+                            "objective": "Refactor auth",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_hook(
+        {"tool_name": "Edit", "tool_input": {"file_path": str(target)}}
+    )
+
+    assert result.returncode == 0
+    assert "Refactor auth" in result.stderr
+    assert "codex-a" in result.stderr
 
 
 def test_hook_blocks_on_conflict_with_flag(tmp_path):

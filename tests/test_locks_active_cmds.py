@@ -27,6 +27,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,23 @@ def _make_bundle(tmp_path: Path) -> Path:
     bundle.mkdir(parents=True)
     (bundle / "spec.yaml").write_text("name: demo\n", encoding="utf-8")
     return bundle
+
+
+def _write_presence(root: Path, *, updated_at: datetime | None = None) -> None:
+    spec_dir = root / ".spec"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    (spec_dir / "team-presence.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "updated_at": (updated_at or datetime.now(timezone.utc)).isoformat(),
+                "self": None,
+                "members": [],
+                "files_index": {},
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
@@ -230,6 +248,119 @@ def test_check_surfaces_active_holders_in_json(tmp_path: Path) -> None:
     holders = body.get("holders") or []
     assert any(h.get("kind") == "active_edit" for h in holders)
     assert any(h.get("lock_id") == acquire["lock_id"] for h in holders)
+
+
+def test_check_distinguishes_unknown_from_clear(tmp_path: Path) -> None:
+    bundle = _make_bundle(tmp_path)
+
+    result = _run(["locks", "check", "auth.py", "--json"], cwd=bundle)
+
+    assert result.returncode == 3
+    assert json.loads(result.stdout) == {
+        "state": "unknown",
+        "clear": False,
+        "path": "auth.py",
+        "holders": [],
+        "pull_alerts": [],
+        "reason": "no_live_data",
+    }
+
+
+def test_check_reports_clear_only_from_a_fresh_mirror(tmp_path: Path) -> None:
+    bundle = _make_bundle(tmp_path)
+    _write_presence(bundle)
+
+    result = _run(["locks", "check", "auth.py", "--json"], cwd=bundle)
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["state"] == "clear"
+    assert json.loads(result.stdout)["clear"] is True
+
+
+def test_check_reports_stale_mirror_as_unknown(tmp_path: Path) -> None:
+    bundle = _make_bundle(tmp_path)
+    _write_presence(bundle, updated_at=datetime.now(timezone.utc) - timedelta(hours=1))
+
+    result = _run(["locks", "check", "auth.py", "--json"], cwd=bundle)
+
+    assert result.returncode == 3
+    assert json.loads(result.stdout)["reason"] == "stale_mirror"
+
+
+def test_check_merges_live_task_claims_into_the_conflict_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _make_bundle(tmp_path)
+    _write_presence(bundle)
+    (bundle / ".spec" / "team-coordination.json").write_text(
+        json.dumps(
+            {
+                "schema": "spec.team-coordination/v1",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "active": [],
+                "recent_outcomes": [],
+                "files_index": {
+                    "auth.py": [
+                        {
+                            "kind": "task_claim",
+                            "key": "1:client:codex:session-a",
+                            "agent": "codex",
+                            "author": "@alice",
+                            "author_user_id": 1,
+                            "session_id": "session-a",
+                            "broadcast_client_id": "client",
+                            "objective": "Build auth",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(["locks", "check", "auth.py", "--json"], cwd=bundle)
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["state"] == "conflict"
+    assert payload["holders"][0]["kind"] == "task_claim"
+    assert payload["holders"][0]["session_id"] == "session-a"
+
+    monkeypatch.setenv("CODEX_THREAD_ID", "session-a")
+    own_result = _run(["locks", "check", "auth.py", "--json"], cwd=bundle)
+    assert own_result.returncode == 0
+    assert json.loads(own_result.stdout)["state"] == "clear"
+
+
+def test_check_uses_existing_coordination_mirror_without_manifest(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_presence(repo)
+    target = repo / "src" / "auth.py"
+    target.parent.mkdir()
+    target.write_text("", encoding="utf-8")
+
+    result = _run(["locks", "check", "src/auth.py", "--json"], cwd=repo)
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["state"] == "clear"
+
+
+def test_acquire_uses_existing_coordination_mirror_without_manifest(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_presence(repo)
+
+    result = _run(
+        ["locks", "acquire", "src/auth.py", "--agent", "codex", "--json"],
+        cwd=repo,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["bundle_root"] == str(repo.resolve())
+    assert payload["paths"] == ["src/auth.py"]
 
 
 def test_prune_removes_expired(tmp_path: Path) -> None:

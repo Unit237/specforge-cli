@@ -310,7 +310,7 @@ spec live on        # re-enable for this bundle (with --verbose for full assista
 | `spec team flag <event_id>` | Flag a teammate's prompt event (`warning` / `question` / `block` / `ack`) in near real time. The flag fans out over the same SSE channel so every connected watcher sees it within an RTT. |
 | `spec presence show` | Show every teammate's current dirty-file list with `+/-` line counts. |
 | `spec presence check <path>` | Exit code is the contract: 0 = clear, 2 = a teammate is editing the path. |
-| `spec locks check <path>` | Same exit-code contract as `presence check`, but ignores a stale presence mirror. `--json` output also carries `pull_alerts` for teammates who are on the same branch and ahead of your `HEAD`. **Also surfaces same-machine multi-agent conflicts** — if your Cursor pane has `auth.py` locked while Claude Code asks, you'll see it. |
+| `spec locks check <path>` | Unified pre-edit contract: task claims, dirty-tree presence, and same-machine active edits. Exit `0` = clear, `2` = conflict, `3` = coordination unknown. `--json` returns the same `state` plus holders and `pull_alerts`. Existing generated mirrors can be used even when the repository is not a compile bundle. |
 | `spec locks pull-status` | Exit `0` when no teammate is ahead of your branch, `2` when at least one same-branch peer has a different `head_commit` — i.e. they pushed and you should `git pull`. `--json` for hooks. |
 | `spec locks acquire <path>` | Take a per-machine **active-edit** lock for a single AI agent. Use `--agent claude_code\|cursor\|codex\|compress\|...` plus `--session <id>` so the same agent renewing doesn't conflict with itself. `--block` exits `2` on cross-agent overlap. Locks have a TTL (default 5 min, cap 60 min) so a crashed agent never deadlocks. |
 | `spec locks release <lock_id>` | Drop a previously-acquired active-edit lock. Unknown ids exit `0` (no-op) — PostToolUse hooks fire unconditionally and must never break. |
@@ -399,9 +399,9 @@ Each project-bound event carries `bundle_label`, while repository-neutral
 events carry the `workspace` label. The repo-local watcher still routes and
 broadcasts local turns for its registered bundle.
 
-When `spec watch` isn't running, `team-presence.json` is missing → all three
-vectors **fail open** (exit 0, silent). We never block work because the daemon
-is off.
+When `spec watch` is not healthy, `spec locks check` returns **unknown**
+(exit 3). Warn-only hooks still preserve local edit availability, but no agent
+may describe missing telemetry as proof that a path is clear.
 
 What's still on the roadmap (deferred until they earn the cost):
 
