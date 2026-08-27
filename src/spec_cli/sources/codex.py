@@ -339,6 +339,10 @@ _CODEX_TOOL_NAME_MAP: dict[str, str] = {
     "fetch": "WebFetch",
 }
 
+_APPLY_PATCH_HEADER_RE = re.compile(
+    r"\*\*\*\s+(Update|Add|Delete)\s+File:\s+(.+?)(?:(?:\\n)|\r?\n)"
+)
+
 
 def _codex_function_call_to_tool(payload: dict) -> ToolCall | None:
     """Decode a Codex rollout ``response_item.type == "function_call"``
@@ -371,6 +375,37 @@ def _codex_function_call_to_tool(payload: dict) -> ToolCall | None:
     if summarized is None:
         return None
     return ToolCall(name=canonical, args=summarized)
+
+
+def _codex_custom_exec_to_tools(payload: dict) -> list[ToolCall]:
+    """Extract only file headers from Codex Desktop's orchestration call.
+
+    The desktop app wraps nested tools in a ``custom_tool_call`` named
+    ``exec``. Its input may contain an ``apply_patch`` program, but persisting
+    that program would leak source content. Patch headers provide the exact
+    task-claim paths without retaining the patch body.
+    """
+    if payload.get("name") != "exec":
+        return []
+    raw = payload.get("input")
+    if not isinstance(raw, str):
+        return []
+    calls: list[ToolCall] = []
+    seen: set[str] = set()
+    for operation, path in _APPLY_PATCH_HEADER_RE.findall(raw):
+        normalized = path.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        canonical = {
+            "Update": "Edit",
+            "Add": "Write",
+            "Delete": "Delete",
+        }[operation]
+        summarized = summarize_tool_call(canonical, {"path": normalized})
+        if summarized is not None:
+            calls.append(ToolCall(name=canonical, args=summarized))
+    return calls
 
 
 def _build_codex_rollout_session(
@@ -463,6 +498,13 @@ def _build_codex_rollout_session(
         if rtype != "response_item" or not isinstance(payload, dict):
             continue
         ptype = payload.get("type")
+        if ptype == "custom_tool_call":
+            flush_pending_response_user()
+            calls = _codex_custom_exec_to_tools(payload)
+            pending_tool_calls.extend(calls)
+            for call in calls:
+                builder.observe_paths_from_call(call)
+            continue
         # Function call rows are siblings of message rows in the
         # Responses API rollout. Accumulate them onto the next
         # assistant message so the wire carries "prose + structured

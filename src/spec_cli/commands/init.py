@@ -35,9 +35,9 @@ Before planning or editing:
 2. Do not duplicate an active objective. Split the work, wait for the handoff,
    or tell the user about the overlap.
 3. Before modifying an existing or potentially shared path, run
-   `spec locks check <bundle-relative-path>`. Exit `0` means clear; exit `2`
-   means another agent may be editing it, so surface the conflict before
-   proceeding.
+   `spec locks check <bundle-relative-path>`. Exit `0` means clear, exit `2`
+   means another agent may be editing it, and exit `3` means coordination
+   health is unknown. Surface either non-zero result before proceeding.
 4. Report material progress, paths changed, blockers, and the final outcome in
    normal assistant messages. Spec Live shares those updates automatically.
 5. When the user asks for cloud review of the current pull request, run
@@ -45,9 +45,9 @@ Before planning or editing:
    exists; the explicit `agent-review` label is the authorization trigger.
 
 Treat the coordination brief as advisory and the lock check as the mechanical
-conflict signal. The brief disappears when the last active round finishes, so
-its absence is normal. When Spec is OFF or a watcher is stopped, cross-machine
-context can be stale or absent and lock checks deliberately fail open. Only the
+conflict signal. Commentary bubbles keep a round active; the brief disappears
+after the final answer or expiry. When Spec is OFF or a watcher is stopped,
+lock checks return unknown rather than claiming the path is clear. Only the
 human operator should change the workday switch with `spec on` / `spec off`.
 Never hand-edit files under `.spec/`.
 {AGENTS_COORDINATION_BLOCK_END}
@@ -373,9 +373,11 @@ spec locks check <bundle-relative-path>
 
 The exit code is the contract:
 
-- **0** → safe to proceed (no teammate on that file, or no fresh mirror).
+- **0** → clear: fresh coordination data shows no overlapping claim or edit.
 - **2** → at least one teammate likely has the file dirty. Show the
   warning and ask the user before overwriting.
+- **3** → coordination health is unknown (missing/stale watcher data). Surface
+  the degraded state instead of treating it as evidence of safety.
 
 `spec locks check` ignores a **stale** `.spec/team-presence.json` (for
 example when `spec watch` is not running) so you do not act on zombie
@@ -389,8 +391,8 @@ If **the user's Spec handle** matches `to_handle` in that YAML, help them
 **commit** if needed and **`git push`** to `origin` on the listed branch
 (never force-push unless the user explicitly asks).
 
-Legacy: `spec presence check` is still available — same exit codes,
-but it does not apply the stale-mirror guard.
+Legacy: `spec presence check` is still available with its older 0/2 contract,
+but it does not distinguish unknown or apply the unified task-claim evaluator.
 
 You do **not** need to run this for files you are creating fresh
 under your own scaffolding (no path conflict possible). Only run it
@@ -403,8 +405,8 @@ automatically for Edit / Write / MultiEdit tool calls.
 
 The human operator controls local sharing with `spec on` at the start of the
 workday and `spec off` when finished. Agents must not change that switch unless
-the user explicitly asks. When it is OFF, say that cross-machine context may be
-unavailable and continue using the fail-open lock result.
+the user explicitly asks. When it is OFF, say that cross-machine context is
+unknown and do not describe the lock result as clear.
 """
 
 
@@ -467,24 +469,16 @@ Teammates can request that **you** push your branch so they can `git pull`:
 
 ## Team journal (optional)
 
-Run `spec journal sync` to materialize recent Spec Live prompt events
-from Cloud into per-day files under `docs/spec-journal/` (git-friendly
-bundle history).
+`spec journal sync` materializes recent Spec Live prompt events from Cloud
+under `docs/spec-journal/`. Run it only when the user asks to refresh that
+history or when a live watcher is already connected and the journal is needed
+for a handoff. It is not a pre-edit or pre-push gate: it requires network
+access and may transfer project metadata to Spec Cloud.
 
-Use this in two situations:
-
-1. **Before writing or editing a file** that is not net-new
-   scaffolding (`Edit`, `MultiEdit`, `Write`, `NotebookEdit`,
-   `StrReplace`, `Delete`). If exit code is non-zero, show the user
-   the warning text and ask whether to proceed before making the
-   edit.
-2. **Before pushing or merging changes** that touch many files —
-   run the check on each touched file and group warnings into one
-   summary the user can react to.
-
-If `.spec/team-presence.json` is missing (no `spec watch` running),
-this command exits 0 silently. That is the expected behaviour —
-fail open, never block work because the daemon isn't on.
+For edit safety, use `spec locks check <bundle-relative-path>` as described
+above. Missing or stale watcher data returns exit `3` (unknown), while an
+overlapping claim returns exit `2`. Both states must be surfaced distinctly;
+only exit `0` proves the current coordination view is clear.
 
 A Claude Code `PreToolUse` hook is automatically wired into
 `.claude/settings.json` by `spec init`, so Claude Code does this

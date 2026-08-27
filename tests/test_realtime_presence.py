@@ -31,6 +31,7 @@ from spec_cli.realtime.presence import (
     compute_local_presence,
 )
 from spec_cli.realtime.presence_mirror import (
+    TEAM_PRESENCE_HEARTBEAT_SECS,
     TeamPresenceMirror,
     read_team_presence,
 )
@@ -78,6 +79,7 @@ def _make_incoming_presence_event(
     received_at: datetime | None = None,
     is_clean: bool = False,
     event_id: int = 1,
+    broadcast_client_id: str | None = None,
 ) -> IncomingEvent:
     return IncomingEvent(
         id=event_id,
@@ -100,6 +102,7 @@ def _make_incoming_presence_event(
         author_name=handle.title(),
         author_avatar_url=None,
         presence=PresencePayload(files=files, head_commit="abc123", is_clean=is_clean),
+        broadcast_client_id=broadcast_client_id,
     )
 
 
@@ -230,6 +233,56 @@ def test_presence_cache_apply_clean_state_drops_peer():
         )
     )
     assert len(cache) == 0
+
+
+def test_presence_cache_ignores_only_this_install_echo():
+    """The local SSE echo is not a teammate, but another machine on the
+    same Spec account is. Identity therefore includes the broadcast client,
+    not only the user id.
+    """
+    cache = PresenceCache(
+        self_user_id=42,
+        self_broadcast_client_id="this-install",
+    )
+    local_echo = _make_incoming_presence_event(
+        user_id=42,
+        handle="alice",
+        files=[PresenceFile(path="auth.py", lines_added=1, lines_removed=0)],
+        broadcast_client_id="this-install",
+    )
+    other_machine = _make_incoming_presence_event(
+        user_id=42,
+        handle="alice",
+        files=[PresenceFile(path="billing.py", lines_added=1, lines_removed=0)],
+        broadcast_client_id="laptop-two",
+        event_id=2,
+    )
+
+    assert cache.apply_event(local_echo) is False
+    assert cache.apply_event(other_machine) is True
+    assert [peer.broadcast_client_id for peer in cache.current()] == ["laptop-two"]
+
+
+def test_presence_cache_keeps_two_installations_for_one_account():
+    cache = PresenceCache()
+    for event_id, client, path in (
+        (1, "laptop-one", "auth.py"),
+        (2, "laptop-two", "billing.py"),
+    ):
+        cache.apply_event(
+            _make_incoming_presence_event(
+                user_id=42,
+                handle="alice",
+                files=[PresenceFile(path=path, lines_added=1, lines_removed=0)],
+                event_id=event_id,
+                broadcast_client_id=client,
+            )
+        )
+
+    assert {peer.broadcast_client_id for peer in cache.current()} == {
+        "laptop-one",
+        "laptop-two",
+    }
 
 
 def test_presence_cache_skips_non_presence_events():
@@ -368,6 +421,34 @@ def test_team_presence_mirror_idempotent_when_unchanged(tmp_path):
     assert mirror.write(cache, local=None, self_handle=None, self_name=None, branch=None) is True
     # Second write with the same cache — must be a no-op (returns False).
     assert mirror.write(cache, local=None, self_handle=None, self_name=None, branch=None) is False
+
+
+def test_team_presence_mirror_refreshes_health_timestamp(tmp_path):
+    """An unchanged working tree must not make a running watcher look stale."""
+    cache = PresenceCache()
+    mirror = TeamPresenceMirror(tmp_path)
+    first = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+    later = first + timedelta(seconds=TEAM_PRESENCE_HEARTBEAT_SECS + 1)
+
+    assert mirror.write(
+        cache,
+        local=None,
+        self_handle=None,
+        self_name=None,
+        branch=None,
+        now=first,
+    )
+    assert mirror.write(
+        cache,
+        local=None,
+        self_handle=None,
+        self_name=None,
+        branch=None,
+        now=later,
+    )
+    body = read_team_presence(tmp_path)
+    assert body is not None
+    assert body["updated_at"] == later.isoformat()
 
 
 def test_read_team_presence_missing_file_returns_none(tmp_path):

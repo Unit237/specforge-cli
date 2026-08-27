@@ -207,6 +207,21 @@ def test_path_normalisation_overlaps_match(bundle_root: Path) -> None:
     assert len(conflicts) == 1
 
 
+def test_directory_claim_overlaps_a_file_inside_it(bundle_root: Path) -> None:
+    """A component claim must cover later file edits beneath it."""
+    store = _store(bundle_root)
+    store.acquire(["src/auth"], agent="codex", session_id="a")
+
+    _, conflicts = store.acquire(
+        ["src/auth/token.py"],
+        agent="cursor",
+        session_id="b",
+    )
+
+    assert len(conflicts) == 1
+    assert conflicts[0].overlapping_paths == ["src/auth/token.py"]
+
+
 def test_holders_for_returns_only_path_matches(bundle_root: Path) -> None:
     """``holders_for`` powers ``spec locks check`` — it must filter
     by path, not return every lock in the file."""

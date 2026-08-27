@@ -1,12 +1,8 @@
-"""``spec locks`` — coordination checks using the team-presence mirror.
+"""``spec locks`` — one decision over every coordination signal.
 
-``spec locks check`` matches ``spec presence check`` exit codes (0 clear,
-2 conflict) but **ignores a stale** ``.spec/team-presence.json`` (when
-``updated_at`` is older than a few minutes, ``spec watch`` is probably
-not running — we fail open instead of trusting zombie data).
-
-``.spec/team-editing-brief.md`` is a plain-language sibling file updated
-with the JSON; agents can read it directly.
+``spec locks check`` combines Cloud-backed task claims, dirty-tree presence,
+and machine-local active edits. Its tri-state exit contract is 0 clear, 2
+conflict, and 3 unknown; unavailable telemetry never masquerades as safety.
 """
 from __future__ import annotations
 
@@ -20,8 +16,12 @@ import click
 from ..config import BundleNotFoundError, find_bundle_root
 from ..realtime.active_edits import (
     DEFAULT_LOCK_TTL_SECS,
-    ActiveEditLock,
     ActiveEditsStore,
+)
+from ..realtime.conflicts import (
+    ConflictAssessment,
+    assess_path_conflict,
+    resolve_coordination_path,
 )
 from ..realtime.presence_mirror import read_team_presence
 from ..realtime.team_editing_brief import (
@@ -43,9 +43,55 @@ def _locks_max_mirror_age_secs() -> float:
         return DEFAULT_LOCKS_MIRROR_STALE_SECS
 
 
+def _render_assessment(assessment: ConflictAssessment) -> None:
+    if assessment.state == "unknown":
+        warn(
+            f"⚠ {assessment.path} — coordination state unknown "
+            f"({assessment.reason or 'unavailable'}). Start or repair `spec watch` "
+            "before treating the path as clear."
+        )
+        return
+    if assessment.state == "clear":
+        if assessment.pull_alerts:
+            warn(
+                "⚠ pull needed before editing — "
+                + ", ".join(
+                    f"@{row['handle']} on {row['branch']} at {row['short_commit']}"
+                    for row in assessment.pull_alerts
+                )
+            )
+        ok(f"clear: no active claim or teammate edit on {assessment.path}")
+        return
+
+    lines: list[str] = []
+    for holder in assessment.holders:
+        kind = holder.get("kind") or "dirty_tree"
+        handle = holder.get("handle") or holder.get("name") or "(unknown)"
+        if kind == "task_claim":
+            lines.append(
+                f"  · {handle} ({holder.get('agent') or 'agent'}, "
+                f"session {holder.get('session_id') or '-'}) — "
+                f"{holder.get('objective') or 'active task claim'}"
+            )
+        elif kind == "active_edit":
+            lines.append(
+                f"  · {handle} (session {holder.get('session_id') or '-'}, "
+                f"intent {holder.get('intent') or '-'})"
+            )
+        else:
+            added = int(holder.get("lines_added") or 0)
+            removed = int(holder.get("lines_removed") or 0)
+            lines.append(f"  · @{handle} dirty tree (+{added}/-{removed})")
+    warn(
+        f"⚠ {assessment.path} — active coordination conflict:\n"
+        + "\n".join(lines)
+        + "\n  Coordinate or use an isolated worktree before editing."
+    )
+
+
 @click.group("locks")
 def locks_group() -> None:
-    """Edit coordination using the Spec Live presence mirror."""
+    """Assess and manage Spec Live edit coordination."""
 
 
 @locks_group.command("check")
@@ -67,188 +113,74 @@ def locks_group() -> None:
     is_flag=True,
     help="Emit machine-readable JSON instead of a rendered warning.",
 )
-def locks_check_cmd(path: str, quiet: bool, include_self: bool, as_json: bool) -> None:
-    """Like ``spec presence check``, but ignores a stale presence mirror.
+@click.option(
+    "--agent",
+    "caller_agent",
+    type=str,
+    default=None,
+    help="Calling agent id; pair with --session to ignore its own lease.",
+)
+@click.option(
+    "--session",
+    "caller_session_id",
+    type=str,
+    default=None,
+    help="Calling agent session id; pair with --agent.",
+)
+def locks_check_cmd(
+    path: str,
+    quiet: bool,
+    include_self: bool,
+    as_json: bool,
+    caller_agent: str | None,
+    caller_session_id: str | None,
+) -> None:
+    """Assess one path using task claims, presence, and local leases.
 
-    Exit **0** when the mirror is missing, you're outside a bundle, or
-    ``updated_at`` is older than ``SPEC_LOCKS_MAX_MIRROR_AGE_SECS``
-    (default: same as ``DEFAULT_LOCKS_MIRROR_STALE_SECS`` — 15 minutes).
-
-    Exit **2** when at least one teammate (non-self) has the path dirty
-    and the mirror is fresh.
+    Exit **0** only for a fresh, clear assessment; **2** for a conflict;
+    **3** when coordination health is unknown. This keeps unavailable or
+    stale telemetry from masquerading as proof that a path is safe.
     """
-    max_age = _locks_max_mirror_age_secs()
-    try:
-        root = find_bundle_root()
-    except BundleNotFoundError as e:
-        if not quiet and not as_json:
-            dim(f"not in a Spec bundle ({e}); skipping locks check.")
-        if as_json:
-            click.echo(json.dumps({"clear": True, "reason": "not_in_bundle"}))
-        sys.exit(0)
+    caller_session_id = caller_session_id or os.environ.get(
+        "SPEC_AGENT_SESSION_ID"
+    )
+    caller_agent = caller_agent or os.environ.get("SPEC_AGENT_SOURCE")
+    if caller_session_id is None:
+        caller_session_id = os.environ.get("CODEX_THREAD_ID") or os.environ.get(
+            "CODEX_SESSION_ID"
+        )
+        if caller_session_id:
+            caller_agent = caller_agent or "codex"
 
-    rel = _bundle_relative_path(path, root)
-    if rel is None:
+    root, rel = resolve_coordination_path(path)
+    if root is None or rel is None:
+        payload = {
+            "state": "unknown",
+            "clear": False,
+            "path": path,
+            "holders": [],
+            "pull_alerts": [],
+            "reason": "outside_workspace",
+        }
         if as_json:
-            click.echo(json.dumps({"clear": True, "reason": "outside_bundle"}))
-        sys.exit(0)
-
-    # Single-user, multi-agent locks live in a *different* machine file
-    # (``~/.spec/active-edits.json``) and exist precisely to coordinate
-    # between Claude Code, Cursor, Codex etc. running side-by-side
-    # on one machine. We read them **first**, before consulting the
-    # team-presence mirror, because the active-edits layer has no
-    # dependency on ``spec watch`` running — a single dev with two
-    # agents but no live daemon still needs check to fire.
-    active_holders = _active_holders_for_path(root, rel)
-    active_holder_payload = [
-        _active_lock_to_holder(lock) for lock in active_holders
-    ]
-
-    body = read_team_presence(root)
-    if body is None:
-        # No team-presence mirror, but active-edits may still flag a
-        # conflict on this machine. Surface them; otherwise emit the
-        # original "no live data" clear response.
-        if active_holder_payload:
-            if as_json:
-                click.echo(
-                    json.dumps(
-                        {
-                            "clear": False,
-                            "path": rel,
-                            "holders": active_holder_payload,
-                            "pull_alerts": [],
-                            "reason": "no_team_presence_active_only",
-                        }
-                    )
-                )
-            elif not quiet:
-                warn(
-                    f"⚠ {rel} — one of your own agents is currently editing:\n"
-                    + "\n".join(
-                        f"  · {h.get('agent')} (session {h.get('session_id') or '-'}, "
-                        f"intent {h.get('intent') or '-'})"
-                        for h in active_holder_payload
-                    )
-                )
-            sys.exit(2)
-        if as_json:
-            click.echo(json.dumps({"clear": True, "reason": "no_live_data"}))
-        sys.exit(0)
-
-    if team_presence_mirror_stale(body, max_age_secs=max_age):
-        # Same exception as above: a stale team-presence mirror does
-        # not invalidate the per-machine active-edits layer.
-        if active_holder_payload:
-            if as_json:
-                click.echo(
-                    json.dumps(
-                        {
-                            "clear": False,
-                            "path": rel,
-                            "holders": active_holder_payload,
-                            "pull_alerts": [],
-                            "reason": "stale_team_presence_active_only",
-                        }
-                    )
-                )
-            elif not quiet:
-                warn(
-                    f"⚠ {rel} — one of your own agents is currently editing:\n"
-                    + "\n".join(
-                        f"  · {h.get('agent')} (session {h.get('session_id') or '-'}, "
-                        f"intent {h.get('intent') or '-'})"
-                        for h in active_holder_payload
-                    )
-                )
-            sys.exit(2)
-        if as_json:
-            click.echo(json.dumps({"clear": True, "reason": "stale_mirror"}))
+            click.echo(json.dumps(payload))
         elif not quiet:
-            dim(
-                "locks: team-presence mirror is stale or undated — "
-                "treating as clear (start `spec watch` for live data)."
-            )
-        sys.exit(0)
+            warn(f"⚠ {path} — coordination state unknown (outside a Git workspace).")
+        sys.exit(3)
 
-    # Pull-needed peers are always surfaced when the mirror is fresh —
-    # regardless of whether the requested path overlaps with a teammate
-    # edit. An AI IDE / hook reading this is about to write *anything*
-    # into the working tree, and knowing the branch is behind a
-    # teammate's just-pushed commit is exactly the moment to ``git
-    # pull`` first.
-    pull_alerts = _compute_pull_alerts(body)
-    holders = _holders_for_path(body, rel, include_self=include_self)
-
-    if active_holder_payload:
-        # An active-edit lock is a conflict regardless of whether a
-        # teammate is also dirty on the path — we always want the
-        # exit code to reflect it.
-        holders = holders + active_holder_payload
-
-    if not holders:
-        if as_json:
-            click.echo(
-                json.dumps(
-                    {
-                        "clear": True,
-                        "path": rel,
-                        "holders": [],
-                        "pull_alerts": pull_alerts,
-                    }
-                )
-            )
-        elif not quiet:
-            if pull_alerts:
-                warn(
-                    "⚠ pull needed before editing — "
-                    + ", ".join(
-                        f"@{a['handle']} on {a['branch']} at {a['short_commit']}"
-                        for a in pull_alerts
-                    )
-                    + f" (you: {pull_alerts[0]['self_short']}). "
-                    "Run `git pull` first."
-                )
-            ok(f"clear: no teammate is editing {rel}")
-        # ``clear`` (no path overlap) trumps "pull needed" in the exit
-        # code so existing CI / hook integrations don't suddenly start
-        # failing — pull-state is a hint, not a hard block.
-        sys.exit(0)
-
+    assessment = assess_path_conflict(
+        root,
+        rel,
+        include_self_dirty=include_self,
+        caller_agent=caller_agent,
+        caller_session_id=caller_session_id,
+        max_presence_age_secs=_locks_max_mirror_age_secs(),
+    )
     if as_json:
-        click.echo(
-            json.dumps(
-                {
-                    "clear": False,
-                    "path": rel,
-                    "holders": holders,
-                    "pull_alerts": pull_alerts,
-                }
-            )
-        )
+        click.echo(json.dumps(assessment.to_json()))
     elif not quiet:
-        bullet_lines = []
-        for h in holders:
-            handle = h.get("handle") or h.get("name") or "(unknown)"
-            added = int(h.get("lines_added") or 0)
-            removed = int(h.get("lines_removed") or 0)
-            untracked = " (new file)" if h.get("untracked") else ""
-            bullet_lines.append(
-                f"  · @{handle} (+{added}/-{removed}){untracked}"
-            )
-        msg = (
-            f"⚠ {rel} — teammate(s) may be editing (fresh mirror):\n"
-            + "\n".join(bullet_lines)
-            + "\n  Pull / coordinate before making conflicting changes."
-        )
-        if pull_alerts:
-            msg += "\n  " + "; ".join(
-                f"@{a['handle']} pushed to {a['branch']} ({a['short_commit']}) — git pull"
-                for a in pull_alerts
-            )
-        warn(msg)
-    sys.exit(2)
+        _render_assessment(assessment)
+    sys.exit({"clear": 0, "conflict": 2, "unknown": 3}[assessment.state])
 
 
 @locks_group.command("pull-status")
@@ -267,14 +199,14 @@ def locks_check_cmd(path: str, quiet: bool, include_self: bool, as_json: bool) -
 def locks_pull_status_cmd(as_json: bool, quiet: bool) -> None:
     """Surface "teammates pushed, you should pull" alerts from the live mirror.
 
-    Same staleness handling as ``spec locks check``: a missing /
-    stale mirror means the watcher isn't running, so we fail open
-    (exit 0). Exit **2** when at least one teammate is on the same
+    Unlike the tri-state pre-edit check, this advisory command fails open when
+    its presence mirror is missing or stale (exit 0). Exit **2** when at least
+    one teammate is on the same
     branch with a different ``head_commit`` — the canonical "git
     pull before you keep editing" signal — and the mirror is fresh.
 
-    Designed for AI IDE rules and pre-edit hooks: cheap, parseable,
-    and matches the ``locks check`` exit-code contract.
+    Designed as a cheap, parseable pull reminder; it is not a path-clearance
+    contract.
     """
     max_age = _locks_max_mirror_age_secs()
     try:
@@ -355,79 +287,6 @@ def locks_show_brief_cmd() -> None:
         dim(f"no {TEAM_EDITING_BRIEF_FILENAME} yet — run `spec watch`.")
         return
     console.print(p.read_text(encoding="utf-8"))
-
-
-def _bundle_relative_path(raw: str, bundle_root: Path) -> str | None:
-    if not raw:
-        return None
-    p = Path(raw)
-    if p.is_absolute():
-        try:
-            return str(p.resolve().relative_to(bundle_root.resolve()))
-        except ValueError:
-            return None
-    candidate = (bundle_root / raw).resolve()
-    try:
-        return str(candidate.relative_to(bundle_root.resolve()))
-    except ValueError:
-        return None
-
-
-def _holders_for_path(
-    body: dict, rel_path: str, *, include_self: bool
-) -> list[dict]:
-    files_index = body.get("files_index")
-    if not isinstance(files_index, dict):
-        return []
-    raw = files_index.get(rel_path)
-    if not isinstance(raw, list):
-        return []
-    out: list[dict] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        if not include_self and bool(entry.get("self") or False):
-            continue
-        out.append(entry)
-    return out
-
-
-def _active_holders_for_path(
-    bundle_root: Path, rel_path: str
-) -> list[ActiveEditLock]:
-    """Locks from the local active-edits store covering ``rel_path``.
-
-    Failures are swallowed: a malformed lock file should not block
-    ``spec locks check``. The store handles the actual JSON read +
-    parse gracefully; we just provide a thin "fail open" wrapper.
-    """
-    try:
-        store = ActiveEditsStore(bundle_root)
-        return store.holders_for(rel_path)
-    except Exception:  # noqa: BLE001
-        return []
-
-
-def _active_lock_to_holder(lock: ActiveEditLock) -> dict:
-    """Project an :class:`ActiveEditLock` into the same shape as the
-    team-presence ``holders[]`` rows so JSON consumers can treat both
-    sources uniformly. We add a ``kind`` field so a renderer that
-    cares about the distinction (cross-machine teammate vs same-
-    machine agent) can disambiguate.
-    """
-    return {
-        "kind": "active_edit",
-        "lock_id": lock.id,
-        "agent": lock.agent,
-        "session_id": lock.session_id,
-        "pid": lock.pid,
-        "host": lock.host,
-        "handle": f"you ({lock.agent})",
-        "intent": lock.intent,
-        "expires_at": lock.expires_at.isoformat(),
-        "bundle_root": lock.bundle_root,
-        "self": True,
-    }
 
 
 # ── single-user multi-agent locks ──────────────────────────────────
@@ -526,34 +385,35 @@ def locks_acquire_cmd(
     The lock id printed to stdout (or returned in JSON) is the
     handle for ``spec locks release``.
     """
-    try:
-        root = find_bundle_root()
-    except BundleNotFoundError as e:
+    # Resolve once from the first target. A generated coordination mirror or
+    # Git worktree is a valid local lease namespace even when the repository
+    # is not itself a compile bundle.
+    root, first_rel = resolve_coordination_path(paths[0])
+    if root is None or first_rel is None:
         if as_json:
-            click.echo(json.dumps({"acquired": False, "reason": "not_in_bundle"}))
-        elif not as_json:
-            fatal(str(e))
-        sys.exit(0 if as_json else 1)
+            click.echo(
+                json.dumps({"acquired": False, "reason": "outside_workspace"})
+            )
+        else:
+            fatal("path is outside a Git workspace")
+        sys.exit(1)
 
-    # Normalise every path to bundle-relative POSIX form. Absolute
-    # paths get rebased; out-of-bundle paths are rejected since the
-    # store is per-bundle.
     rels: list[str] = []
     for raw in paths:
-        rel = _bundle_relative_path(raw, root)
-        if rel is None:
+        candidate_root, rel = resolve_coordination_path(raw)
+        if rel is None or candidate_root != root:
             if as_json:
                 click.echo(
                     json.dumps(
                         {
                             "acquired": False,
-                            "reason": "path_outside_bundle",
+                            "reason": "path_outside_workspace_scope",
                             "path": raw,
                         }
                     )
                 )
             else:
-                fatal(f"path is outside the bundle: {raw}")
+                fatal(f"path is outside the coordination scope: {raw}")
             sys.exit(1)
         rels.append(rel)
 

@@ -8,7 +8,6 @@ into the **same** commit (via the ``commit-msg`` hook), and `git push` runs
 from __future__ import annotations
 
 import os
-import os
 import shlex
 import shutil
 import subprocess

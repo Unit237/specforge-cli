@@ -55,7 +55,7 @@ def test_add_dot_after_push_treats_pushed_unchanged(
     a file whose disk bytes match its last-pushed snapshot is treated
     as clean — exactly like ``git add`` is a no-op on an unchanged file.
     """
-    from spec_cli.stage import load_index, save_index, sha256
+    from spec_cli.stage import load_index, save_index
 
     root = tmp_path / "b"
     _bundle(root)

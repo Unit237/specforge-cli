@@ -8,6 +8,7 @@ from spec_cli.cli import cli
 from spec_cli.commands.init import (
     AGENTS_COORDINATION_BLOCK_BEGIN,
     AGENTS_COORDINATION_BLOCK_END,
+    _STARTER_AGENTS,
 )
 
 
@@ -16,6 +17,22 @@ def _bundle(tmp_path):
     root.mkdir()
     (root / "spec.yaml").write_text('schema: "spec/v0.1"\nname: Demo\n', encoding="utf-8")
     return root
+
+
+def test_starter_agents_treats_journal_sync_as_optional():
+    assert "It is not a pre-edit or pre-push gate" in _STARTER_AGENTS
+    assert "Missing or stale watcher data returns exit `3`" in _STARTER_AGENTS
+    assert "If exit code is non-zero, show the user" not in _STARTER_AGENTS
+
+
+def test_starter_agents_documents_the_tristate_lock_contract():
+    rendered = " ".join(_STARTER_AGENTS.split())
+    assert "Exit `0` means clear" in rendered
+    assert "exit `2` means another agent may be editing it" in rendered
+    assert "exit `3` means coordination health is unknown" in rendered
+    assert "lock checks return unknown rather than claiming the path is clear" in (
+        rendered
+    )
 
 
 def test_upgrade_rules_appends_agents_coordination_without_overwriting(tmp_path, monkeypatch):
