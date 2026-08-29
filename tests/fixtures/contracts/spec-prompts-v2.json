@@ -1,0 +1,22 @@
+{
+  "contract_id": "spec-prompts-v2",
+  "version": 2,
+  "schema": "spec.prompts/v0.1",
+  "common_required": {
+    "commit": ["branch", "author_name", "author_email"],
+    "session": ["id", "source"],
+    "turn": ["role"]
+  },
+  "cases": [
+    {
+      "name": "minimal conversation",
+      "text": "schema = \"spec.prompts/v0.1\"\n\n[commit]\nbranch = \"main\"\nauthor_name = \"Ada\"\nauthor_email = \"ada@example.com\"\n\n[[sessions]]\nid = \"session-1\"\nsource = \"codex\"\n\n[[sessions.turns]]\nrole = \"user\"\ntext = \"Find the shared invariant.\"\n",
+      "expected": {"sessions": 1, "first_session_id": "session-1", "first_turn_role": "user", "first_turn_text": "Find the shared invariant."}
+    },
+    {
+      "name": "multiline assistant summary",
+      "text": "schema = \"spec.prompts/v0.1\"\n\n[commit]\nbranch = \"feature/invariants\"\nauthor_name = \"Grace\"\nauthor_email = \"grace@example.com\"\n\n[[sessions]]\nid = \"session-2\"\nsource = \"codex\"\nverbose = false\n\n[[sessions.turns]]\nrole = \"user\"\ntext = '''\nTrace the policy.\nDo not speculate.\n'''\n\n[[sessions.turns]]\nrole = \"assistant\"\nsummary = \"Registered one invariant.\"\nmodel = \"gpt-test\"\n",
+      "expected": {"sessions": 1, "first_session_id": "session-2", "first_turn_role": "user", "first_turn_text": "Trace the policy.\nDo not speculate.\n", "last_turn_role": "assistant"}
+    }
+  ]
+}

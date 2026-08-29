@@ -1,0 +1,18 @@
+{
+  "contract_id": "spec-bundle-resolver-v1",
+  "version": 1,
+  "rule_order": ["frontmatter", "exclude", "explicit_include", "agent_instruction", "human_doc", "default_docs_glob"],
+  "cases": [
+    {"name": "non markdown", "path": "docs/logo.png", "manifest_spec": null, "frontmatter": null, "expected": false},
+    {"name": "default docs markdown", "path": "docs/product.md", "manifest_spec": null, "frontmatter": null, "expected": true},
+    {"name": "human readme excluded", "path": "docs/README.md", "manifest_spec": null, "frontmatter": null, "expected": false},
+    {"name": "agent instructions included", "path": "nested/AGENTS.md", "manifest_spec": null, "frontmatter": null, "expected": true},
+    {"name": "exclude wins", "path": "docs/private.md", "manifest_spec": {"exclude": ["docs/private.md"]}, "frontmatter": null, "expected": false},
+    {"name": "explicit include beats human denylist", "path": "README.md", "manifest_spec": {"include": ["README.md"]}, "frontmatter": null, "expected": true},
+    {"name": "custom include disables default docs", "path": "docs/product.md", "manifest_spec": {"include": ["specs/**/*.md"]}, "frontmatter": null, "expected": false},
+    {"name": "frontmatter true wins over exclude", "path": "docs/private.md", "manifest_spec": {"exclude": ["docs/private.md"]}, "frontmatter": {"spec": true}, "expected": true},
+    {"name": "frontmatter false wins over agent rule", "path": "AGENTS.md", "manifest_spec": null, "frontmatter": {"spec": false}, "expected": false},
+    {"name": "frontmatter include shorthand", "path": "notes/decision.md", "manifest_spec": null, "frontmatter": {"spec": {"include": true}}, "expected": true},
+    {"name": "unmatched auxiliary markdown", "path": "notes/decision.md", "manifest_spec": null, "frontmatter": null, "expected": false}
+  ]
+}
