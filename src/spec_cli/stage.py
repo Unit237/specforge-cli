@@ -349,7 +349,12 @@ def _git_ls_tracked_and_untracked(root: Path) -> list[Path] | None:
         if not rel or rel in seen:
             continue
         seen.add(rel)
-        p = (root / rel).resolve()
+        p = root / rel
+        # A bundle is a closed, portable source tree. Following a tracked
+        # symlink could make staging depend on files outside that tree (or
+        # fail when the target is not present on another machine).
+        if p.is_symlink():
+            continue
         if not p.is_file():
             continue
         out.append(p)
@@ -376,6 +381,12 @@ def _filesystem_walk(root: Path) -> Iterable[Path]:
             continue
         for entry in entries:
             name = entry.name
+            # Never follow links while discovering bundle contents. Besides
+            # keeping snapshots portable, this prevents environment links
+            # such as ``venv/bin/python`` and Flutter plugin links from
+            # escaping the bundle root during path normalization.
+            if entry.is_symlink():
+                continue
             if entry.is_dir():
                 if name.startswith(".") and entry != root:
                     continue

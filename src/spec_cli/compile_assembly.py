@@ -14,13 +14,13 @@ compile prompt can be hashed, reviewed, and reproduced.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from .config import Manifest
 from .constants import PROMPTS_DIRNAME, is_bundle_md
 from .frontmatter import read_frontmatter
 from .prompts.tiers import Tier, iter_compilable
-from .stage import rel_posix
+from .stage import rel_posix, walk_spec_files
 
 
 # ---------------------------------------------------------------------------
@@ -85,18 +85,11 @@ def _collect_spec_files(root: Path, manifest: Manifest) -> list[str]:
             ordered.append(entry)
             seen.add(entry)
 
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
+    # Use the canonical bundle walker rather than a second raw filesystem
+    # traversal. It owns dependency/build pruning, gitignore handling, and
+    # the invariant that a portable bundle never follows filesystem links.
+    for path in walk_spec_files(root, manifest=manifest.data):
         rel = rel_posix(root, path)
-        # Skip dotfile dirs — `.git`, `.spec`, `.venv`. The resolver
-        # already understands `.cursor/rules/**/*.mdc` (which has its
-        # own extension), but we skip dot-dirs at the walk level so the
-        # CLI never tries to read every file under `node_modules` or
-        # `.git/objects`.
-        parts = PurePosixPath(rel).parts
-        if any(p.startswith(".") for p in parts[:-1]):
-            continue
         low = rel.lower()
         if not (low.endswith(".md") or low.endswith(".markdown")):
             continue

@@ -189,6 +189,22 @@ def test_assemble_bundle_splits_curated_and_captured(tmp_path: Path) -> None:
     assert set(flat_rels) == set(curated_rels) | set(captured_rels)
 
 
+def test_assemble_bundle_does_not_follow_external_symlinks(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    root.mkdir()
+    _make_bundle(root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "README.md").write_text("# External dependency\n", encoding="utf-8")
+    (root / "api").mkdir()
+    (root / "api" / "venv").symlink_to(outside, target_is_directory=True)
+
+    manifest = load_manifest(root)
+    bundle = assemble_bundle(root, manifest)
+
+    assert [rel for rel, _ in bundle.spec_files] == ["docs/product.md"]
+
+
 def test_render_compile_prompt_labels_tiers(tmp_path: Path) -> None:
     root = _make_bundle(tmp_path)
     _write_prompt(
