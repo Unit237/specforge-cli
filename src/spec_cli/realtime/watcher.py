@@ -63,7 +63,11 @@ from ..sources import (
 from ..stage import historical_bundle_paths, record_bundle_path
 from ..ui import configure_streaming_stdio, dim, warn
 from .broadcast_identity import load_or_create_broadcast_client_id
-from .coordination import CoordinationCache, TeamCoordinationMirror
+from .coordination import (
+    CoordinationCache,
+    TeamCoordinationMirror,
+    read_team_coordination,
+)
 from .events import OutgoingEvent, ToolCallPayload
 from .live_event_dedup import LivePromptEventDeduper
 from .mirror import PeerMirror
@@ -75,6 +79,12 @@ from .presence import (
     compute_local_presence,
 )
 from .presence_mirror import TeamPresenceMirror
+from .repository_scope import (
+    path_targets_root,
+    resolve_cwd,
+    resolve_root,
+    roots_touched_by_paths,
+)
 from .live_doctor import QUIET_PROMPT_POST_SECS, emit_live_doctor_warnings
 from .tracker import LiveCursor, PRODUCER_BASELINE_VERSION
 from .transport import (
@@ -112,7 +122,7 @@ CURSOR_SAVE_INTERVAL_SECS = 10.0
 # Recent Cloud rows printed only when ``spec watch --bootstrap`` is requested.
 # A normal join is live-only and does not seed the SSE connection from a
 # persisted consumer cursor.
-WATCH_BOOTSTRAP_LIMIT_DEFAULT = 80
+WATCH_BOOTSTRAP_LIMIT_DEFAULT = 200
 # Hard cap on per-event text payload before redaction. The server caps
 # at 512 KB; we cap a hair below to avoid edge-of-frame rejections,
 # leaving room for redaction expanding text by a few bytes.
@@ -348,11 +358,6 @@ def build_watch_bootstrap_events(
             continue
         role = raw.get("role")
         if role == "presence":
-            continue
-        if role == "assistant_closed":
-            # Transport sentinel for coalescing, not visible history. Keeping
-            # it out of bootstrap prevents long Codex runs from evicting the
-            # human prompt and named chat context from the replay window.
             continue
         try:
             ev = IncomingEvent.from_json(raw)
@@ -642,8 +647,9 @@ def run_watcher(
     coordination_cache = CoordinationCache(bundle_root)
     team_coordination = TeamCoordinationMirror(bundle_root)
     last_local_presence: list[LocalPresence] = []  # nonlocal-able mutable handle
-    # Clear a stale projection left by an interrupted prior watcher before
-    # bootstrap replay has a chance to rebuild it from Cloud.
+    # Restore a still-fresh projection before reconnecting. Quiet agents must
+    # not disappear simply because the watcher restarted between SSE frames.
+    coordination_cache.restore_snapshot(read_team_coordination(bundle_root))
     team_coordination.sync(coordination_cache)
 
     if opts.broadcast:
@@ -682,7 +688,10 @@ def run_watcher(
                 # this install's own echo. A solo user's workspace feed is
                 # still useful, and suppressing that echo made ``spec watch``
                 # look empty when nobody else was on the account.
-                if coordination_cache.apply_event(event):
+                if coordination_cache.accepts_event(
+                    event,
+                    project_id=opts.project_id,
+                ) and coordination_cache.apply_event(event):
                     team_coordination.sync(coordination_cache)
                 if event.role == "presence":
                     # Conversation turns are workspace-wide, but dirty-file
@@ -1386,8 +1395,9 @@ def _scoped_sessions(
     project boundaries and multiplying traffic.  Exact/in-bundle working
     directories remain unambiguous. A parent-workspace session touching one
     child is admitted by that child's watcher. A session touching multiple
-    children (or none) is admitted by one deterministic watcher and posted to
-    the workspace endpoint, never to an arbitrary project.
+    children is admitted by one deterministic watcher and posted to the
+    workspace endpoint, never to an arbitrary project. A session with no path
+    evidence waits until its first exact touch establishes an owner.
 
     If the current root is not in the registry, preserve the historical
     behavior; that covers direct ``spec watch`` use before machine discovery.
@@ -1402,29 +1412,26 @@ def _session_route(
     bundle_paths,
 ) -> str:  # type: ignore[no-untyped-def]
     """Return ``project``, ``workspace``, or ``skip`` for this watcher."""
-    paths = [Path(value).expanduser().resolve() for value in bundle_paths]
+    paths = [root for value in bundle_paths if (root := resolve_root(value)) is not None]
     if not paths:
         return "skip"
     current = paths[0]
-    registered: list[Path] = []
-    for raw in load_preferences().bundles:
-        try:
-            root = Path(raw).expanduser().resolve()
-        except OSError:
-            continue
-        if root not in registered:
-            registered.append(root)
+    registered = list(
+        dict.fromkeys(
+            root
+            for raw in load_preferences().bundles
+            if (root := resolve_root(raw)) is not None
+        )
+    )
     if current not in registered:
         return "project"
 
-    raw_cwd = (session.cwd or "").strip()
-    if not raw_cwd:
+    if not (session.cwd or "").strip():
         return "project"
-    try:
-        cwd = Path(raw_cwd).expanduser().resolve()
-    except OSError:
+    cwd = resolve_cwd(session.cwd)
+    if cwd is None:
         return "skip"
-    if cwd == current or current in cwd.parents:
+    if path_targets_root(cwd, current):
         return "project"
     if cwd not in current.parents:
         return "skip"
@@ -1436,24 +1443,20 @@ def _session_route(
     if len(candidates) <= 1:
         return "project"
 
-    touched_candidates: set[Path] = set()
-    for raw_path in session.paths_touched or []:
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            continue
-        candidate_path = Path(raw_path).expanduser()
-        if not candidate_path.is_absolute():
-            candidate_path = cwd / candidate_path
-        try:
-            candidate_path = candidate_path.resolve()
-        except OSError:
-            continue
-        for root in candidates:
-            if candidate_path == root or root in candidate_path.parents:
-                touched_candidates.add(root)
+    touched_candidates = roots_touched_by_paths(
+        session.paths_touched or [],
+        cwd=cwd,
+        roots=candidates,
+    )
 
     if len(touched_candidates) == 1:
         return "project" if current in touched_candidates else "skip"
-    return "workspace" if current == candidates[0] else "skip"
+    if len(touched_candidates) > 1:
+        return "workspace" if current == candidates[0] else "skip"
+    # A parent-root objective with no path telemetry has no defensible project
+    # owner yet. Wait for the first exact touch instead of mirroring the prompt
+    # into every child board as unrelated coordination noise.
+    return "skip"
 
 
 def _build_outgoing(

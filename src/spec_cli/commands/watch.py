@@ -452,7 +452,10 @@ def watch_cmd(
             prompt_scope=prompt_scope,
             receive=not no_receive,
             render_received=not background_runner,
-            bootstrap_receive=bootstrap and not no_receive,
+            # Daemons rebuild coordination after machine restarts even when
+            # no agent emits a fresh frame immediately. Foreground history
+            # remains opt-in to avoid surprising terminal output.
+            bootstrap_receive=(bootstrap or background_runner) and not no_receive,
             persist_cursor=foreground_daemon is None,
             mirror=mirror,
             # Presence shares the same gates as prompt broadcasting so a

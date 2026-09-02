@@ -556,6 +556,62 @@ def test_codex_desktop_exec_extracts_apply_patch_paths_without_patch_body(
     assert "secret patch body" not in json.dumps([call.args for call in calls])
 
 
+def test_codex_desktop_current_namespaced_tools_preserve_exact_edit_paths(
+    tmp_path: Path,
+) -> None:
+    rollout = tmp_path / "namespaced-tools.jsonl"
+    target = tmp_path / "src" / "service.py"
+    rows = [
+        {
+            "timestamp": "2026-09-02T01:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "desktop-current", "cwd": str(tmp_path)},
+        },
+        {
+            "timestamp": "2026-09-02T01:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Fix service."},
+        },
+        {
+            "timestamp": "2026-09-02T01:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "tools.edit_file",
+                "arguments": json.dumps(
+                    {"file_path": str(target), "old_string": "a", "new_string": "b"}
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-09-02T01:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "functions.exec",
+                "input": (
+                    'const patch = "*** Begin Patch\\n'
+                    f'*** Update File: {target}\\n'
+                    '@@\\n-a\\n+b\\n*** End Patch";'
+                ),
+            },
+        },
+    ]
+    rollout.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    session = read_codex_rollout_session(rollout, verbose=True)
+
+    assert session is not None
+    assert session.paths_touched == [str(target)]
+    assert [call.args["path"] for call in session.turns[-1].tool_calls or []] == [
+        str(target),
+        str(target),
+    ]
+
+
 def test_list_recent_codex_sessions_omits_internal_approval_review(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -94,6 +94,29 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
             author_avatar_url=None,
         )
     )
+    events.append(
+        evmod.IncomingEvent(
+            id=5,
+            project_id=2,
+            session_id="other-project-prompt",
+            source="cursor",
+            role="user",
+            branch="main",
+            commit_sha=None,
+            model=None,
+            summary="unrelated",
+            text="unrelated project prompt",
+            title=None,
+            cwd=str(tmp_path),
+            paths_touched=[],
+            turn_at=evmod.datetime.now(evmod.timezone.utc),
+            received_at=evmod.datetime.now(evmod.timezone.utc),
+            author_user_id=3,
+            author_handle="charlie",
+            author_name="Charlie",
+            author_avatar_url=None,
+        )
+    )
     # The first frame is this install's own SSE echo. Solo users must see it
     # in the workspace feed as well as in the coordination projection.
     events[0].author_user_id = 1
@@ -190,7 +213,7 @@ def test_watcher_drains_incoming_on_main_thread(monkeypatch, tmp_path) -> None:
 
     run_watcher(tmp_path, opts, stop_event=stop)
 
-    assert notifier.show_calls == [1, 2, 3]
+    assert notifier.show_calls == [1, 2, 3, 5]
     assert consumer_calls
     assert consumer_calls[0][1]["workspace"] is True
     assert consumer_calls[0][1]["include_presence"] is True

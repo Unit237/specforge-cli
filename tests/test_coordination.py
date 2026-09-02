@@ -4,7 +4,11 @@ import json
 import threading
 from datetime import datetime, timedelta, timezone
 
-from spec_cli.realtime.coordination import CoordinationCache, TeamCoordinationMirror
+from spec_cli.realtime.coordination import (
+    CoordinationCache,
+    TeamCoordinationMirror,
+    event_targets_bundle,
+)
 from spec_cli.realtime.events import IncomingEvent, ToolCallPayload
 
 
@@ -124,6 +128,60 @@ def test_duplicate_and_out_of_order_events_do_not_rewind(tmp_path):
     assert snapshot["active"][0]["objective"] == "New"
 
 
+def test_workspace_event_requires_exact_bundle_telemetry(tmp_path):
+    bundle = tmp_path / "repo"
+    sibling = tmp_path / "sibling"
+    bundle.mkdir()
+    sibling.mkdir()
+
+    inside = _event(
+        1,
+        role="user",
+        session="inside",
+        paths=["repo/src/auth.py"],
+    )
+    inside.project_id = 0
+    inside.cwd = str(tmp_path)
+    outside = _event(
+        2,
+        role="user",
+        session="outside",
+        paths=["sibling/src/auth.py"],
+    )
+    outside.project_id = 0
+    outside.cwd = str(tmp_path)
+    ambiguous = _event(
+        3,
+        role="user",
+        session="ambiguous",
+        paths=["src/auth.py"],
+    )
+    ambiguous.project_id = 0
+    ambiguous.cwd = None
+
+    assert event_targets_bundle(inside, bundle)
+    assert not event_targets_bundle(outside, bundle)
+    assert not event_targets_bundle(ambiguous, bundle)
+
+    cache = CoordinationCache(bundle)
+    assert cache.accepts_event(inside, project_id=10)
+    assert not cache.accepts_event(outside, project_id=10)
+
+
+def test_active_workspace_round_accepts_pathless_close(tmp_path):
+    cache = CoordinationCache(tmp_path)
+    user = _event(1, role="user", session="a", text="Build auth")
+    user.project_id = 0
+    user.cwd = str(tmp_path)
+    close = _event(2, role="assistant_closed", session="a", seconds=1)
+    close.project_id = 0
+    close.cwd = None
+    close.paths_touched = []
+
+    assert cache.apply_event(user)
+    assert cache.tracks_event_round(close)
+
+
 def test_delayed_close_from_prior_generation_does_not_close_new_prompt(tmp_path):
     cache = CoordinationCache(tmp_path)
     cache.apply_event(_event(1, role="user", session="a", text="First"))
@@ -207,17 +265,58 @@ def test_commentary_close_keeps_agent_round_active_until_final_answer(tmp_path):
 def test_stale_round_expires_and_mirror_deletes_files(tmp_path):
     cache = CoordinationCache(tmp_path, freshness_secs=10)
     mirror = TeamCoordinationMirror(tmp_path)
-    cache.apply_event(_event(1, role="user", session="a", text="Build auth"))
+    cache.apply_event(
+        _event(
+            1,
+            role="user",
+            session="a",
+            text="Build auth",
+            paths=["src/auth.py"],
+        )
+    )
     assert mirror.sync(cache, now=NOW + timedelta(seconds=1))
     assert mirror.json_path.is_file()
     assert mirror.md_path.is_file()
     body = json.loads(mirror.json_path.read_text(encoding="utf-8"))
     assert body["active"][0]["objective"] == "Build auth"
     assert "Read this before planning or editing" in mirror.md_path.read_text(encoding="utf-8")
+    markdown = mirror.md_path.read_text(encoding="utf-8")
+    assert markdown.index("## Claimed path index") < markdown.index(
+        "## Active agent rounds"
+    )
 
     assert mirror.sync(cache, now=NOW + timedelta(seconds=11))
     assert not mirror.json_path.exists()
     assert not mirror.md_path.exists()
+
+
+def test_fresh_coordination_snapshot_survives_watcher_restart(tmp_path):
+    original = CoordinationCache(tmp_path, freshness_secs=120)
+    original.apply_event(_event(10, role="user", session="a", text="Build auth"))
+    original.apply_event(
+        _event(
+            11,
+            role="assistant",
+            session="a",
+            summary="Editing token validation",
+            paths=["src/auth.py"],
+            seconds=1,
+        )
+    )
+    snapshot = original.snapshot(now=NOW + timedelta(seconds=2))
+
+    restarted = CoordinationCache(tmp_path, freshness_secs=120)
+    assert restarted.restore_snapshot(snapshot, now=NOW + timedelta(seconds=30))
+    restored = restarted.snapshot(now=NOW + timedelta(seconds=31))
+
+    assert restored is not None
+    assert restored["active"][0]["session_id"] == "a"
+    assert list(restored["files_index"]) == ["src/auth.py"]
+    # The restored event cursor prevents a replayed older Cloud frame from
+    # rewinding or closing this still-active generation.
+    assert not restarted.apply_event(
+        _event(9, role="assistant_closed", session="a", seconds=20)
+    )
 
 
 def test_tool_paths_are_normalized_and_indexed(tmp_path):

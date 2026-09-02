@@ -268,9 +268,14 @@ class _SessionBuilder:
             self.ended_at = ts
 
     def observe_paths_from_call(self, call: ToolCall) -> None:
-        p = call.args.get("path")
-        if isinstance(p, str) and p and p not in self.paths_touched:
-            self.paths_touched.append(p)
+        for key in _CODEX_PATH_ARGUMENTS:
+            path = call.args.get(key)
+            if (
+                isinstance(path, str)
+                and path
+                and path not in self.paths_touched
+            ):
+                self.paths_touched.append(path)
 
     def to_session(self, *, verbose: bool, cwd: str | None) -> Session | None:
         if not self.turns:
@@ -338,10 +343,47 @@ _CODEX_TOOL_NAME_MAP: dict[str, str] = {
     "web_search": "WebSearch",
     "fetch": "WebFetch",
 }
+_CODEX_PATH_ARGUMENTS = ("path", "file_path", "notebook_path", "target_path")
 
 _APPLY_PATCH_HEADER_RE = re.compile(
     r"\*\*\*\s+(Update|Add|Delete)\s+File:\s+(.+?)(?:(?:\\n)|\r?\n)"
 )
+
+
+def _codex_tool_name(raw_name: object) -> str | None:
+    if not isinstance(raw_name, str) or not raw_name:
+        return None
+    canonical = _CODEX_TOOL_NAME_MAP.get(raw_name) or _CODEX_TOOL_NAME_MAP.get(
+        raw_name.rsplit(".", 1)[-1]
+    )
+    return canonical if canonical in ALLOWED_TOOL_NAMES else None
+
+
+def _codex_tool_arguments(payload: dict) -> dict:
+    raw = payload.get("arguments") or payload.get("input") or {}
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _canonical_path_argument(args: dict) -> dict:
+    if "path" in args:
+        return args
+    alias = next(
+        (
+            args[key]
+            for key in _CODEX_PATH_ARGUMENTS[1:]
+            if isinstance(args.get(key), str)
+        ),
+        None,
+    )
+    return {**args, "path": alias} if alias is not None else args
 
 
 def _codex_function_call_to_tool(payload: dict) -> ToolCall | None:
@@ -354,23 +396,10 @@ def _codex_function_call_to_tool(payload: dict) -> ToolCall | None:
     reviewer sees a single "the AI replied" line carrying the prose
     body and the ordered tool list.
     """
-    raw_name = payload.get("name")
-    if not isinstance(raw_name, str) or not raw_name:
+    canonical = _codex_tool_name(payload.get("name"))
+    if canonical is None:
         return None
-    canonical = _CODEX_TOOL_NAME_MAP.get(raw_name)
-    if canonical is None or canonical not in ALLOWED_TOOL_NAMES:
-        return None
-    args_raw = payload.get("arguments") or payload.get("input") or {}
-    args: dict = {}
-    if isinstance(args_raw, str) and args_raw.strip():
-        try:
-            parsed = json.loads(args_raw)
-            if isinstance(parsed, dict):
-                args = parsed
-        except json.JSONDecodeError:
-            pass
-    elif isinstance(args_raw, dict):
-        args = args_raw
+    args = _canonical_path_argument(_codex_tool_arguments(payload))
     summarized = summarize_tool_call(canonical, args)
     if summarized is None:
         return None
@@ -385,7 +414,8 @@ def _codex_custom_exec_to_tools(payload: dict) -> list[ToolCall]:
     that program would leak source content. Patch headers provide the exact
     task-claim paths without retaining the patch body.
     """
-    if payload.get("name") != "exec":
+    raw_name = str(payload.get("name") or "")
+    if raw_name not in {"exec", "functions.exec"} and not raw_name.endswith(".exec"):
         return []
     raw = payload.get("input")
     if not isinstance(raw, str):
@@ -514,9 +544,7 @@ def _build_codex_rollout_session(
             call = _codex_function_call_to_tool(payload)
             if call is not None:
                 pending_tool_calls.append(call)
-                p = call.args.get("path")
-                if isinstance(p, str) and p and p not in builder.paths_touched:
-                    builder.paths_touched.append(p)
+                builder.observe_paths_from_call(call)
             continue
         if ptype != "message":
             continue

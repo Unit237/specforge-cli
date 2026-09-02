@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from spec_cli.realtime.coordination import CoordinationCache, TeamCoordinationMirror
+
 
 SPEC_BIN = [sys.executable, "-m", "spec_cli"]
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
@@ -56,11 +58,12 @@ def _make_bundle(tmp_path: Path) -> Path:
 def _write_presence(root: Path, *, updated_at: datetime | None = None) -> None:
     spec_dir = root / ".spec"
     spec_dir.mkdir(parents=True, exist_ok=True)
+    at = updated_at or datetime.now(timezone.utc)
     (spec_dir / "team-presence.json").write_text(
         json.dumps(
             {
                 "schema": 1,
-                "updated_at": (updated_at or datetime.now(timezone.utc)).isoformat(),
+                "updated_at": at.isoformat(),
                 "self": None,
                 "members": [],
                 "files_index": {},
@@ -68,6 +71,7 @@ def _write_presence(root: Path, *, updated_at: datetime | None = None) -> None:
         ),
         encoding="utf-8",
     )
+    TeamCoordinationMirror(root).sync(CoordinationCache(root), now=at)
 
 
 def _run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
@@ -275,6 +279,21 @@ def test_check_reports_clear_only_from_a_fresh_mirror(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert json.loads(result.stdout)["state"] == "clear"
     assert json.loads(result.stdout)["clear"] is True
+
+
+def test_check_never_false_clears_when_coordination_projection_is_missing(
+    tmp_path: Path,
+) -> None:
+    bundle = _make_bundle(tmp_path)
+    _write_presence(bundle)
+    (bundle / ".spec" / "team-coordination-health.json").unlink()
+
+    result = _run(["locks", "check", "auth.py", "--json"], cwd=bundle)
+
+    assert result.returncode == 3
+    body = json.loads(result.stdout)
+    assert body["state"] == "unknown"
+    assert body["reason"] == "no_coordination_data"
 
 
 def test_check_reports_stale_mirror_as_unknown(tmp_path: Path) -> None:

@@ -21,12 +21,17 @@ import pytest
 from click.testing import CliRunner
 
 from spec_cli.commands.locks import locks_group
+from spec_cli.realtime.coordination import CoordinationCache, TeamCoordinationMirror
 
 
 def _write_presence(root: Path, body: dict) -> None:
     spec = root / ".spec"
     spec.mkdir(parents=True, exist_ok=True)
     (spec / "team-presence.json").write_text(json.dumps(body), encoding="utf-8")
+    TeamCoordinationMirror(root).sync(
+        CoordinationCache(root),
+        now=datetime.fromisoformat(str(body["updated_at"])),
+    )
 
 
 def _fresh_body(self_commit: str, peer_commit: str, *,

@@ -39,6 +39,6 @@ def test_build_watch_bootstrap_skips_transport_rows_and_sorts_ascending() -> Non
         },
     ]
     events = build_watch_bootstrap_events(client, limit=10)
-    assert [e.id for e in events] == [1, 2]
-    assert all(e.role not in {"presence", "assistant_closed"} for e in events)
+    assert [e.id for e in events] == [1, 2, 4]
+    assert all(e.role != "presence" for e in events)
     client.list_my_prompt_events.assert_called_once_with(limit=20)

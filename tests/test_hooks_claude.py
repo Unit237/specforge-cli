@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from spec_cli.realtime.coordination import CoordinationCache, TeamCoordinationMirror
+
 
 SPEC_BIN = [sys.executable, "-m", "spec_cli"]
 
@@ -49,6 +51,10 @@ def _write_team_presence(bundle_root: Path, files_index: dict) -> None:
     }
     (spec_dir / "team-presence.json").write_text(
         json.dumps(body, indent=2), encoding="utf-8"
+    )
+    TeamCoordinationMirror(bundle_root).sync(
+        CoordinationCache(bundle_root),
+        now=datetime.fromisoformat(body["updated_at"]),
     )
 
 

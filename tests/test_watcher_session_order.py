@@ -178,7 +178,7 @@ def test_parent_workspace_session_is_allowed_for_only_registered_child(
     assert list(watcher_mod._scoped_sessions([session], [signal])) == [session]
 
 
-def test_ambiguous_parent_session_is_workspace_routed_once(
+def test_ambiguous_parent_session_waits_for_exact_path_telemetry(
     monkeypatch, tmp_path: Path
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -195,9 +195,9 @@ def test_ambiguous_parent_session_is_workspace_routed_once(
         turns=[Turn(role="user", text="plan work across products")],
     )
 
-    assert watcher_mod._session_route(session, [actionairy]) == "workspace"
+    assert watcher_mod._session_route(session, [actionairy]) == "skip"
     assert watcher_mod._session_route(session, [signal]) == "skip"
-    assert list(watcher_mod._scoped_sessions([session], [actionairy])) == [session]
+    assert list(watcher_mod._scoped_sessions([session], [actionairy])) == []
     assert list(watcher_mod._scoped_sessions([session], [signal])) == []
 
 
@@ -237,7 +237,8 @@ def test_workspace_session_posts_only_to_workspace_endpoint(
         id="workspace-post",
         source="codex",
         cwd=str(workspace),
-        turns=[Turn(role="user", text="plan without selecting a repo")],
+        paths_touched=["actionairy/app.py", "signal/index.ts"],
+        turns=[Turn(role="user", text="coordinate both selected repos")],
     )
     monkeypatch.setattr(
         watcher_mod, "_iter_local_sessions", lambda _paths: iter([session])

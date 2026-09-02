@@ -19,7 +19,11 @@ from typing import Literal
 from ..config import BundleNotFoundError, find_bundle_root
 from ..git import repo_toplevel
 from .active_edits import ActiveEditLock, ActiveEditsStore, paths_overlap
-from .coordination import DEFAULT_ROUND_FRESHNESS_SECS, read_team_coordination
+from .coordination import (
+    DEFAULT_ROUND_FRESHNESS_SECS,
+    read_team_coordination,
+    read_team_coordination_health,
+)
 from .presence_mirror import read_team_presence
 from .team_editing_brief import (
     DEFAULT_LOCKS_MIRROR_STALE_SECS,
@@ -137,6 +141,15 @@ def assess_path_conflict(
         coordination,
         max_age_secs=float(DEFAULT_ROUND_FRESHNESS_SECS),
     )
+    coordination_health = read_team_coordination_health(bundle_root)
+    coordination_health_fresh = not team_presence_mirror_stale(
+        coordination_health,
+        max_age_secs=float(DEFAULT_ROUND_FRESHNESS_SECS),
+    )
+    coordination_known_empty = bool(
+        coordination_health_fresh
+        and int((coordination_health or {}).get("active_count") or 0) == 0
+    )
     claims = (
         _task_claim_holders(
             coordination or {},
@@ -163,6 +176,18 @@ def assess_path_conflict(
             holders=[],
             pull_alerts=[],
             reason="no_live_data" if presence is None else "stale_mirror",
+        )
+    if not coordination_fresh and not coordination_known_empty:
+        return ConflictAssessment(
+            state="unknown",
+            path=rel_path,
+            holders=[],
+            pull_alerts=pull_alerts,
+            reason=(
+                "no_coordination_data"
+                if coordination is None and coordination_health is None
+                else "stale_coordination_mirror"
+            ),
         )
     return ConflictAssessment(
         state="clear",
