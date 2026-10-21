@@ -27,6 +27,7 @@ from .commands.review import prs_cmd, review_cmd
 from .commands.push import push_cmd
 from .commands.shell import shell_group
 from .commands.team import team_cmd, team_watch_cmd
+from .commands.agents import agents_group
 from .commands.unstage import unstage_cmd
 from .commands.status import status_cmd
 from .commands.watch import watch_cmd
@@ -72,6 +73,7 @@ cli.add_command(prompts_group)
 cli.add_command(log_cmd)
 cli.add_command(watch_cmd)
 cli.add_command(team_cmd)
+cli.add_command(agents_group)
 activity_cmd = copy(team_watch_cmd)
 activity_cmd.help = """Stream every agent turn across your Spec workspace.
 

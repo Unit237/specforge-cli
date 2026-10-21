@@ -57,6 +57,16 @@ class CloudClient:
             }
         )
 
+    def publish_agent_message(self, project_id: int, message: dict) -> dict:
+        return self._request("POST", f"/api/projects/{project_id}/agent-messages", json=message)
+
+    def agent_messages(self, *, project_id=None, team_id=None, after_id=0, recipient=None, limit=50) -> dict:
+        if (project_id is None) == (team_id is None):
+            raise ValueError("Choose one project or team inbox")
+        path = f"/api/teams/{team_id}" if team_id is not None else f"/api/projects/{project_id}"
+        return self._request("GET", path + "/agent-messages",
+            params={"after_id": after_id, "limit": limit, **({"recipient": recipient} if recipient else {})})
+
     # -- helpers --------------------------------------------------------
 
     def _url(self, path: str) -> str:

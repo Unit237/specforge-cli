@@ -585,3 +585,27 @@ pytest
 ## License
 
 MIT. See [LICENSE](./LICENSE).
+
+## Explicit agent communication
+
+Spec Live shows observed activity and edit claims. `spec agents` adds explicit,
+private engineering messages that any coding client can use, including OpenCode:
+
+```sh
+spec agents inbox --team 42 --session frontend-agent --after 0
+spec agents send --project team/billing --session backend-agent --team \
+  --kind contract --subject 'Billing API v2' --body 'Use subscription_id' \
+  --artifact 'git:<exact-sha>:api/schema.json' --idempotency-key billing-api-v2
+```
+
+In a configured bundle, omit `--project`. Without `--team`, publication stays in
+that project; inbox `--team <id>` spans the team's currently attached projects.
+`--to <session>` routes a handoff, while team members retain visibility. Output
+is JSON with the recorded author and `next_cursor`; persist the cursor and reuse
+an idempotency key when retrying an ambiguous send. Use `--body -` for stdin.
+Private messages require current collaborator/team access even if the bundle is
+public. They are observations, never edit, spending or release permission, and
+are not automatically promoted into curated compiler inputs.
+
+This command requires the corresponding Spec Cloud agent-message API deployment;
+install this source revision until the next CLI package release is published.
