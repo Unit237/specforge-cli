@@ -1,0 +1,43 @@
+{
+  "schema_version": "spec.agent-messages/v1",
+  "message_kinds": [
+    "contract",
+    "handoff",
+    "blocker",
+    "verification",
+    "progress",
+    "question",
+    "answer"
+  ],
+  "audiences": [
+    "project",
+    "team"
+  ],
+  "limits": {
+    "session_id": 128,
+    "source": 32,
+    "subject": 240,
+    "body": 8000,
+    "artifacts": 16,
+    "artifact_reference": 1000,
+    "idempotency_key": 128,
+    "page": 100
+  },
+  "authority": {
+    "author": "authenticated-spec-user",
+    "private_scope": "current-project-collaborator-or-current-attached-team-member",
+    "messages_grant_execution": false,
+    "messages_become_curated_intent": false
+  },
+  "delivery": {
+    "identity": [
+      "project_id",
+      "user_id",
+      "idempotency_key"
+    ],
+    "changed_retry": "conflict",
+    "ordering": "ascending-id",
+    "resume": "exclusive-after_id",
+    "initial_context": "bounded-latest-page"
+  }
+}
